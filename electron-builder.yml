@@ -1,0 +1,26 @@
+appId: com.worklens.desktop
+productName: WorkLens
+directories:
+  output: release
+files:
+  - out/**
+  - package.json
+  - node_modules/**
+asar: true
+asarUnpack:
+  - node_modules/@cursor/sdk/**
+  - node_modules/@cursor/sdk-*/**
+  - node_modules/@napi-rs/**
+  - node_modules/sharp/**
+  - node_modules/@img/**
+  - node_modules/tesseract.js/**
+  - node_modules/tesseract.js-core/**
+  - node_modules/@tesseract.js-data/**
+mac:
+  category: public.app-category.productivity
+  hardenedRuntime: true
+  gatekeeperAssess: false
+  target:
+    - dmg
+    - zip
+artifactName: ${productName}-${version}-${arch}.${ext}
