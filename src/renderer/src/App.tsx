@@ -245,6 +245,7 @@ export function App(): ReactNode {
 
   return (
     <div className="app-shell">
+      <a className="skip-link" href="#main-content">跳到主要内容</a>
       <aside className="sidebar">
         <div className="window-drag-region" />
         <div className="brand">
@@ -307,7 +308,7 @@ export function App(): ReactNode {
           </div>
         )}
 
-        <main className="content">
+        <main className="content" id="main-content" tabIndex={-1}>
           {loading ? <LoadingState /> : (
             <>
               {activeNav === 'dashboard' && <Dashboard snapshot={snapshot} navigate={navigate} openBrief={openBrief} onSelectSource={setSelectedSource} />}
@@ -1470,10 +1471,10 @@ function SearchPopover({ query, results, onClose, onOpen }: { query: string; res
 
 function NavButton({ item, active, onClick }: { item: (typeof NAV_ITEMS)[number]; active: boolean; onClick: () => void }): ReactNode {
   const Icon = item.icon
-  return <button className={`nav-item ${active ? 'active' : ''}`} onClick={onClick}><Icon size={17} /><span>{item.label}</span></button>
+  return <button className={`nav-item ${active ? 'active' : ''}`} aria-current={active ? 'page' : undefined} onClick={onClick}><Icon size={17} /><span>{item.label}</span></button>
 }
 function AskNavButton({ active, onClick }: { active: boolean; onClick: () => void }): ReactNode {
-  return <button className={`ask-nav-card ${active ? 'active' : ''}`} onClick={onClick}><span className="ask-nav-icon"><MessageCircleQuestion size={18} /></span><span className="ask-nav-copy"><strong>问工作资料</strong><small>让本机 AI 回答历史工作</small></span><ArrowRight size={15} /></button>
+  return <button className={`ask-nav-card ${active ? 'active' : ''}`} aria-current={active ? 'page' : undefined} onClick={onClick}><span className="ask-nav-icon"><MessageCircleQuestion size={18} /></span><span className="ask-nav-copy"><strong>问工作资料</strong><small>让本机 AI 回答历史工作</small></span><ArrowRight size={15} /></button>
 }
 function Panel({ title, subtitle, action, children }: { title: string; subtitle: string; action?: ReactNode; children: ReactNode }): ReactNode {
   return <section className="panel"><div className="panel-header"><div><h2>{title}</h2><p>{subtitle}</p></div>{action}</div>{children}</section>
