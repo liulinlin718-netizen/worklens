@@ -2427,35 +2427,76 @@ button.timeline-card:hover {
 }
 
 .export-report-panel {
-  display: grid;
-  grid-template-columns: minmax(320px, 0.85fr) minmax(0, 1.15fr);
   overflow: hidden;
 }
 
-.export-config {
-  padding-bottom: 20px;
-  border-right: 1px solid var(--line);
+.export-report-heading {
+  padding: 18px 20px 14px;
+  border-bottom: 1px solid var(--line);
 }
 
-.export-formats {
-  min-width: 0;
-  padding: 18px 20px 16px;
-}
-
-.export-formats-heading {
-  margin-bottom: 14px;
-}
-
-.export-formats-heading h2 {
+.export-report-heading h2 {
   margin: 0;
   font-size: 13px;
   font-weight: 720;
 }
 
-.export-formats-heading p {
+.export-report-heading p {
   margin: 4px 0 0;
   color: var(--faint);
   font-size: 9px;
+}
+
+.export-scope-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1.2fr) minmax(260px, 0.8fr);
+  align-items: end;
+  gap: 20px;
+  padding: 18px 20px;
+}
+
+.export-config {
+  min-width: 0;
+}
+
+.export-formats {
+  min-width: 0;
+  padding: 18px 20px 16px;
+  border-top: 1px solid var(--line);
+}
+
+.export-section-label {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
+
+.export-section-label > span {
+  display: grid;
+  width: 25px;
+  height: 25px;
+  flex: 0 0 auto;
+  place-items: center;
+  border-radius: 8px;
+  color: var(--violet);
+  background: var(--violet-soft);
+  font-size: 7px;
+  font-weight: 750;
+}
+
+.export-section-label strong,
+.export-section-label small {
+  display: block;
+}
+
+.export-section-label strong {
+  font-size: 10px;
+}
+
+.export-section-label small {
+  margin-top: 2px;
+  color: var(--faint);
+  font-size: 7px;
 }
 
 .date-range {
@@ -2463,7 +2504,7 @@ button.timeline-card:hover {
   grid-template-columns: 1fr auto 1fr;
   align-items: end;
   gap: 10px;
-  padding: 18px 20px;
+  padding: 14px 0 0;
 }
 
 .date-range > svg {
@@ -2473,7 +2514,7 @@ button.timeline-card:hover {
 
 .export-range-status {
   min-height: 18px;
-  margin: -6px 20px 12px;
+  margin: 8px 0 0;
   color: #898a90;
   font-size: 8px;
 }
@@ -2491,7 +2532,7 @@ button.timeline-card:hover {
   display: grid;
   grid-template-columns: repeat(3, 1fr);
   gap: 1px;
-  margin: 0 20px;
+  margin: 0;
   overflow: hidden;
   border: 1px solid var(--line);
   border-radius: 9px;
@@ -2528,8 +2569,9 @@ button.timeline-card:hover {
   gap: 10px;
 }
 
-.format-grid.three .format-card:last-of-type {
-  grid-column: 1 / -1;
+.format-grid.three {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  margin-top: 14px;
 }
 
 .format-card {
@@ -2537,7 +2579,7 @@ button.timeline-card:hover {
   grid-template-columns: 38px 1fr auto;
   align-items: center;
   gap: 10px;
-  min-height: 104px;
+  min-height: 98px;
   padding: 14px;
   border: 1px solid var(--line);
   border-radius: 12px;
