@@ -86,7 +86,7 @@ try {
   if ((await window.evaluate(() => window.worklens.getSnapshot())).sources.length !== 2) {
     throw new Error('Pasting wrote to the database before confirmation')
   }
-  await window.getByRole('button', { name: '加入待导入' }).click()
+  await window.getByRole('button', { name: '加入待处理' }).click()
   await window.getByRole('button', { name: '开始处理 1 项' }).click()
   await window.getByText('2026-08-23', { exact: true }).waitFor({ state: 'visible' })
   const batchSnapshot = await window.evaluate(() => window.worklens.getSnapshot())

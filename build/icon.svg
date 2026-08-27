@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" role="img" aria-label="WorkLens">
+  <defs>
+    <linearGradient id="background" x1="160" y1="128" x2="864" y2="896" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#8172EA"/>
+      <stop offset="1" stop-color="#5141B4"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0" cy="0" r="1" gradientTransform="translate(744 236) rotate(132) scale(590)" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#A99EFA" stop-opacity=".9"/>
+      <stop offset="1" stop-color="#A99EFA" stop-opacity="0"/>
+    </radialGradient>
+    <filter id="shadow" x="64" y="78" width="896" height="896" filterUnits="userSpaceOnUse">
+      <feDropShadow dx="0" dy="24" stdDeviation="28" flood-color="#2D246E" flood-opacity=".28"/>
+    </filter>
+  </defs>
+  <g filter="url(#shadow)">
+    <rect x="96" y="72" width="832" height="832" rx="220" fill="url(#background)"/>
+    <rect x="96" y="72" width="832" height="832" rx="220" fill="url(#glow)"/>
+  </g>
+  <g fill="none" stroke="#fff" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M512 248v116M512 620v116M276 492h116M632 492h116" stroke-width="46"/>
+    <path d="M512 354c18 76 58 116 132 138-74 22-114 62-132 138-18-76-58-116-132-138 74-22 114-62 132-138Z" stroke-width="42"/>
+    <path d="M304 290c8 34 26 52 60 62-34 10-52 28-60 62-8-34-26-52-60-62 34-10 52-28 60-62Z" stroke-width="30" opacity=".94"/>
+    <path d="M730 604c7 30 23 46 52 55-29 9-45 25-52 55-7-30-23-46-52-55 29-9 45-25 52-55Z" stroke-width="28" opacity=".9"/>
+  </g>
+</svg>

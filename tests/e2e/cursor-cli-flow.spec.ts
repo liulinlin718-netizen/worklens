@@ -138,7 +138,7 @@ if (args.includes('--version')) {
 
     await page.getByRole('button', { name: '问工作资料' }).click()
     await page.getByPlaceholder('例如：上个月我在支付项目上完成了什么？').fill('我完成了什么体验评审？')
-    await page.getByRole('button', { name: '向 Cursor 提问' }).click()
+    await page.getByRole('button', { name: '向本机 AI 提问' }).click()
     await expect(page.getByText('你完成了 Agent 体验评审，并记录了评审结果。')).toBeVisible()
     await expect(page.getByRole('button', { name: /体验评审/ })).toBeVisible()
   } finally {

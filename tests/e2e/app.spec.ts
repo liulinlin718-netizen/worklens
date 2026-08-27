@@ -41,6 +41,9 @@ test('keeps daily capture separate and archives a mixed-day batch by content dat
 
   try {
     const window = await electronApp.firstWindow()
+    await electronApp.evaluate(({ shell }) => {
+      shell.openPath = async () => ''
+    })
     window.on('console', (message) => console.log(`[renderer:${message.type()}] ${message.text()}`))
     window.on('pageerror', (error) => console.error(`[renderer:error] ${error.message}`))
     await expect(window).toHaveTitle('WorkLens')
@@ -64,7 +67,7 @@ test('keeps daily capture separate and archives a mixed-day batch by content dat
     await expect(window.getByText('待整理').first()).toBeVisible()
 
     await window.locator('.quick-entry').filter({ hasText: '批量上传' }).click()
-    await expect(window.getByRole('heading', { name: '先把资料放进待导入列表' })).toBeVisible()
+    await expect(window.getByRole('heading', { name: '先把资料放进待处理列表' })).toBeVisible()
     await expect(window.locator('.batch-pick-button')).toHaveCount(0)
     await window.locator('.batch-file-input').setInputFiles([julyPath, augustPath, docxPath, pdfPath])
     await expect(window.locator('.batch-queue-row')).toHaveCount(4)
@@ -93,6 +96,19 @@ test('keeps daily capture separate and archives a mixed-day batch by content dat
       { kind: 'pdf', date: '2026-08-18', assetCount: 1 }
     ]))
 
+    const docxResult = window.locator('.batch-source-row').filter({ hasText: '桌面端批量上传' })
+    await docxResult.locator('.batch-source-open').click()
+    await expect(window.locator('.source-drawer')).toBeVisible()
+    await expect(window.locator('.attachment-card')).toHaveCount(1)
+    await window.locator('.attachment-open-button').click()
+    await expect(window.locator('.asset-success')).toContainText('已打开')
+    await window.locator('.attachment-thumbnail').click()
+    await expect(window.locator('.asset-preview-dialog')).toBeVisible()
+    await window.locator('.asset-preview-dialog footer').getByRole('button', { name: '打开原件' }).click()
+    await expect(window.locator('.asset-preview-dialog .asset-open-notice')).toContainText('已打开')
+    await window.getByRole('button', { name: '关闭附件预览' }).click()
+    await window.getByRole('button', { name: '关闭原始资料' }).click()
+
     const julyRow = window.locator('.batch-source-row').filter({ hasText: '支付接口' })
     await julyRow.locator('input[type="date"]').fill('2026-07-13')
     await expect(window.getByText('2026-07-13', { exact: true })).toBeVisible()
@@ -113,7 +129,7 @@ test('keeps daily capture separate and archives a mixed-day batch by content dat
     })
     await expect(window.locator('.batch-paste-card textarea')).toHaveValue('2026年8月24日完成复制粘贴工作记录验证。')
     expect((await window.evaluate(() => globalThis.window.worklens.getSnapshot())).sources).toHaveLength(5)
-    await window.getByRole('button', { name: '加入待导入' }).click()
+    await window.getByRole('button', { name: '加入待处理' }).click()
     await expect(window.locator('.batch-queue-row')).toHaveCount(1)
     await window.getByRole('button', { name: '开始处理 1 项' }).click()
     await expect(window.getByText('2026-08-24', { exact: true })).toBeVisible()
@@ -124,9 +140,9 @@ test('keeps daily capture separate and archives a mixed-day batch by content dat
     ]))
 
     await window.getByRole('button', { name: '完成并查看时间线' }).click()
-    await expect(window.getByRole('heading', { name: '7 月 13 日' })).toBeVisible()
-    await expect(window.getByRole('heading', { name: '8 月 24 日' })).toBeVisible()
-    await expect(window.getByRole('heading', { name: '8 月 21 日' })).toBeVisible()
+    await expect(window.getByRole('heading', { name: '工作时间线' })).toBeVisible()
+    await expect(window.getByText('时间线等待第一条工作内容')).toBeVisible()
+    await expect(window.locator('.timeline-card')).toHaveCount(0)
   } finally {
     await electronApp.close()
     rmSync(userData, { recursive: true, force: true })

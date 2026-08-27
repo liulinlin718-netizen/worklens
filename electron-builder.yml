@@ -17,6 +17,7 @@ asarUnpack:
   - node_modules/tesseract.js-core/**
   - node_modules/@tesseract.js-data/**
 mac:
+  icon: build/icon.png
   category: public.app-category.productivity
   hardenedRuntime: true
   gatekeeperAssess: false

@@ -34,7 +34,6 @@ import {
   ListFilter,
   LoaderCircle,
   LogIn,
-  Menu,
   MessageCircleQuestion,
   Network,
   Plus,
@@ -301,7 +300,6 @@ export function App(): ReactNode {
               <SearchPopover query={searchQuery} results={searchResults} onClose={() => setSearchOpen(false)} onOpen={openSearchResult} />
             )}
           </div>
-          <button className="icon-button" aria-label="菜单"><Menu size={18} /></button>
         </header>
 
         {progress && (
@@ -1254,22 +1252,22 @@ function ExportPage({ snapshot, notify, fail }: { snapshot: AppSnapshot; notify:
     <div className="export-layout">
       <section className="export-report-panel panel">
         <div className="export-report-heading"><h2>按日期范围导出工作报告</h2><p>选择日期和报告格式后导出，不会再次调用 AI</p></div>
-        <div className="export-scope-row">
+        <div className="export-workspace">
           <div className="export-config">
             <div className="export-section-label"><span>01</span><div><strong>选择工作日期范围</strong><small>开始与结束日期均包含在导出结果中</small></div></div>
             <div className="date-range"><label>开始日期<input type="date" value={fromDate} aria-invalid={rangeInvalid} onChange={(event) => setFromDate(event.target.value)} /></label><ArrowRight size={16} /><label>结束日期<input type="date" value={toDate} aria-invalid={rangeInvalid} onChange={(event) => setToDate(event.target.value)} /></label></div>
             <div className={`export-range-status ${rangeInvalid ? 'error' : ''}`} role={rangeInvalid ? 'alert' : undefined}>{rangeInvalid ? '开始日期不能晚于结束日期' : rangeComplete ? `当前范围：${fromDate} 至 ${toDate}` : '请选择完整的开始与结束日期'}</div>
+            <div className="export-preview"><div><FileText size={17} /><strong>{previewCounts?.sources ?? '—'}</strong><span>份资料</span></div><div><Clipboard size={17} /><strong>{previewCounts?.briefs ?? '—'}</strong><span>份日报</span></div><div><BriefcaseBusiness size={17} /><strong>{previewCounts?.events ?? '—'}</strong><span>个事项</span></div></div>
           </div>
-          <div className="export-preview"><div><FileText size={17} /><strong>{previewCounts?.sources ?? '—'}</strong><span>份资料</span></div><div><Clipboard size={17} /><strong>{previewCounts?.briefs ?? '—'}</strong><span>份日报</span></div><div><BriefcaseBusiness size={17} /><strong>{previewCounts?.events ?? '—'}</strong><span>个事项</span></div></div>
-        </div>
-        <div className="export-formats">
-          <div className="export-section-label"><span>02</span><div><strong>选择导出格式</strong><small>三种报告均严格使用上方选择的日期范围</small></div></div>
-          <div className="format-grid three">
-            {formats.map((item) => {
-              const Icon = item.icon
-              return <button className={`format-card ${!exportReady ? 'scope-required' : ''}`} aria-describedby={!exportReady ? 'export-scope-message' : undefined} key={item.id} onClick={() => void runExport(item.id)} disabled={Boolean(busy)}><div className="format-icon"><Icon size={22} /></div><div><h3>{item.title}</h3><p>{item.text}</p></div>{busy === item.id ? <LoaderCircle className="spin" size={18} /> : <ChevronRight size={18} />}</button>
-            })}
-            {!exportReady && <p className="export-scope-message" id="export-scope-message">请先选择完整的开始与结束日期</p>}
+          <div className="export-formats">
+            <div className="export-section-label"><span>02</span><div><strong>选择导出格式</strong><small>三种报告均严格使用左侧选择的日期范围</small></div></div>
+            <div className="format-grid three">
+              {formats.map((item) => {
+                const Icon = item.icon
+                return <button className={`format-card ${!exportReady ? 'scope-required' : ''}`} aria-describedby={!exportReady ? 'export-scope-message' : undefined} key={item.id} onClick={() => void runExport(item.id)} disabled={Boolean(busy)}><div className="format-icon"><Icon size={22} /></div><div><h3>{item.title}</h3><p>{item.text}</p></div>{busy === item.id ? <LoaderCircle className="spin" size={18} /> : <ChevronRight size={18} />}</button>
+              })}
+              {!exportReady && <p className="export-scope-message" id="export-scope-message">请先选择完整的开始与结束日期，再选择导出格式</p>}
+            </div>
           </div>
         </div>
       </section>
