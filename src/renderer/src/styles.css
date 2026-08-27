@@ -2421,15 +2421,41 @@ button.timeline-card:hover {
 
 .export-layout {
   display: grid;
-  grid-template-columns: minmax(320px, 0.85fr) minmax(0, 1.15fr);
   gap: 16px;
   max-width: 1050px;
   margin: 0 auto;
 }
 
+.export-report-panel {
+  display: grid;
+  grid-template-columns: minmax(320px, 0.85fr) minmax(0, 1.15fr);
+  overflow: hidden;
+}
+
 .export-config {
-  grid-row: span 2;
   padding-bottom: 20px;
+  border-right: 1px solid var(--line);
+}
+
+.export-formats {
+  min-width: 0;
+  padding: 18px 20px 16px;
+}
+
+.export-formats-heading {
+  margin-bottom: 14px;
+}
+
+.export-formats-heading h2 {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 720;
+}
+
+.export-formats-heading p {
+  margin: 4px 0 0;
+  color: var(--faint);
+  font-size: 9px;
 }
 
 .date-range {
@@ -2575,7 +2601,6 @@ button.timeline-card:hover {
 
 .backup-callout {
   display: grid;
-  grid-column: 2;
   grid-template-columns: 42px 1fr auto;
   align-items: center;
   gap: 12px;

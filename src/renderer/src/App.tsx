@@ -1252,18 +1252,23 @@ function ExportPage({ snapshot, notify, fail }: { snapshot: AppSnapshot; notify:
 
   return (
     <div className="export-layout">
-      <section className="export-config panel">
-        <div className="panel-header"><div><h2>选择工作日期范围</h2><p>导出已有日报，不会再次调用 AI</p></div></div>
-        <div className="date-range"><label>开始日期<input type="date" value={fromDate} aria-invalid={rangeInvalid} onChange={(event) => setFromDate(event.target.value)} /></label><ArrowRight size={16} /><label>结束日期<input type="date" value={toDate} aria-invalid={rangeInvalid} onChange={(event) => setToDate(event.target.value)} /></label></div>
-        <div className={`export-range-status ${rangeInvalid ? 'error' : ''}`} role={rangeInvalid ? 'alert' : undefined}>{rangeInvalid ? '开始日期不能晚于结束日期' : rangeComplete ? `当前范围：${fromDate} 至 ${toDate}` : '请选择完整的开始与结束日期'}</div>
-        <div className="export-preview"><div><FileText size={17} /><strong>{previewCounts?.sources ?? '—'}</strong><span>份资料</span></div><div><Clipboard size={17} /><strong>{previewCounts?.briefs ?? '—'}</strong><span>份日报</span></div><div><BriefcaseBusiness size={17} /><strong>{previewCounts?.events ?? '—'}</strong><span>个事项</span></div></div>
-      </section>
-      <section className="format-grid three">
-        {formats.map((item) => {
-          const Icon = item.icon
-          return <button className={`format-card ${!exportReady ? 'scope-required' : ''}`} aria-describedby={!exportReady ? 'export-scope-message' : undefined} key={item.id} onClick={() => void runExport(item.id)} disabled={Boolean(busy)}><div className="format-icon"><Icon size={22} /></div><div><h3>{item.title}</h3><p>{item.text}</p></div>{busy === item.id ? <LoaderCircle className="spin" size={18} /> : <ChevronRight size={18} />}</button>
-        })}
-        {!exportReady && <p className="export-scope-message" id="export-scope-message">请先选择完整的开始与结束日期</p>}
+      <section className="export-report-panel panel">
+        <div className="export-config">
+          <div className="panel-header"><div><h2>选择工作日期范围</h2><p>导出已有日报，不会再次调用 AI</p></div></div>
+          <div className="date-range"><label>开始日期<input type="date" value={fromDate} aria-invalid={rangeInvalid} onChange={(event) => setFromDate(event.target.value)} /></label><ArrowRight size={16} /><label>结束日期<input type="date" value={toDate} aria-invalid={rangeInvalid} onChange={(event) => setToDate(event.target.value)} /></label></div>
+          <div className={`export-range-status ${rangeInvalid ? 'error' : ''}`} role={rangeInvalid ? 'alert' : undefined}>{rangeInvalid ? '开始日期不能晚于结束日期' : rangeComplete ? `当前范围：${fromDate} 至 ${toDate}` : '请选择完整的开始与结束日期'}</div>
+          <div className="export-preview"><div><FileText size={17} /><strong>{previewCounts?.sources ?? '—'}</strong><span>份资料</span></div><div><Clipboard size={17} /><strong>{previewCounts?.briefs ?? '—'}</strong><span>份日报</span></div><div><BriefcaseBusiness size={17} /><strong>{previewCounts?.events ?? '—'}</strong><span>个事项</span></div></div>
+        </div>
+        <div className="export-formats">
+          <div className="export-formats-heading"><h2>选择导出格式</h2><p>右侧报告将严格使用左侧选择的日期范围</p></div>
+          <div className="format-grid three">
+            {formats.map((item) => {
+              const Icon = item.icon
+              return <button className={`format-card ${!exportReady ? 'scope-required' : ''}`} aria-describedby={!exportReady ? 'export-scope-message' : undefined} key={item.id} onClick={() => void runExport(item.id)} disabled={Boolean(busy)}><div className="format-icon"><Icon size={22} /></div><div><h3>{item.title}</h3><p>{item.text}</p></div>{busy === item.id ? <LoaderCircle className="spin" size={18} /> : <ChevronRight size={18} />}</button>
+            })}
+            {!exportReady && <p className="export-scope-message" id="export-scope-message">请先选择完整的开始与结束日期</p>}
+          </div>
+        </div>
       </section>
       <section className="backup-callout"><div className="backup-icon"><Database size={22} /></div><div><h3>创建完整本地备份</h3><p>包含所有日期、数据库、结构化数据与全部原始附件。</p></div><button className="secondary-button" disabled={Boolean(busy)} onClick={() => void backup()}>{busy === 'backup' ? <LoaderCircle className="spin" size={16} /> : <Archive size={16} />}立即备份</button></section>
     </div>
