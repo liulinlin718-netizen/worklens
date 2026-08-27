@@ -2421,7 +2421,7 @@ button.timeline-card:hover {
 
 .export-layout {
   display: grid;
-  grid-template-columns: minmax(360px, 0.85fr) minmax(480px, 1.15fr);
+  grid-template-columns: minmax(320px, 0.85fr) minmax(0, 1.15fr);
   gap: 16px;
   max-width: 1050px;
   margin: 0 auto;
@@ -2492,59 +2492,6 @@ button.timeline-card:hover {
 }
 
 .export-preview span {
-  color: var(--faint);
-  font-size: 7px;
-}
-
-.export-all-option {
-  display: grid;
-  width: calc(100% - 40px);
-  min-height: 60px;
-  grid-template-columns: 34px 1fr auto;
-  align-items: center;
-  gap: 10px;
-  margin: 12px 20px 0;
-  padding: 10px 12px;
-  border: 1px solid var(--line);
-  border-radius: 10px;
-  color: var(--ink);
-  background: #faf9f6;
-  cursor: pointer;
-  text-align: left;
-  transition: 150ms ease;
-}
-
-.export-all-option:hover,
-.export-all-option.selected {
-  border-color: rgba(101, 88, 211, 0.4);
-  background: #f7f5ff;
-}
-
-.export-all-option.selected > svg {
-  color: var(--violet);
-}
-
-.export-all-icon {
-  display: grid;
-  width: 34px;
-  height: 34px;
-  place-items: center;
-  border-radius: 9px;
-  color: var(--violet);
-  background: var(--violet-soft);
-}
-
-.export-all-option strong,
-.export-all-option small {
-  display: block;
-}
-
-.export-all-option strong {
-  font-size: 9px;
-}
-
-.export-all-option small {
-  margin-top: 3px;
   color: var(--faint);
   font-size: 7px;
 }

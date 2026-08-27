@@ -1194,18 +1194,12 @@ function EventsPage({ events, sources, initialSection = 'events', onSelectSource
 function ExportPage({ snapshot, notify, fail }: { snapshot: AppSnapshot; notify: (message: string) => void; fail: (error: unknown) => void }): ReactNode {
   const [fromDate, setFromDate] = useState('')
   const [toDate, setToDate] = useState('')
-  const [scope, setScope] = useState<'range' | 'all'>('range')
   const [busy, setBusy] = useState('')
   const rangeComplete = Boolean(fromDate && toDate)
   const rangeInvalid = rangeComplete && fromDate > toDate
-  const exportReady = scope === 'all' || (rangeComplete && !rangeInvalid)
+  const exportReady = rangeComplete && !rangeInvalid
   const previewCounts = useMemo(() => {
     if (!exportReady) return null
-    if (scope === 'all') return {
-      sources: snapshot.sources.length,
-      briefs: snapshot.dailyBriefs.length,
-      events: snapshot.events.length
-    }
     const inRange = (value: string | null): boolean => {
       if (!value) return false
       const date = value.slice(0, 10)
@@ -1218,18 +1212,18 @@ function ExportPage({ snapshot, notify, fail }: { snapshot: AppSnapshot; notify:
       briefs: snapshot.dailyBriefs.filter((brief) => inRange(brief.workDate)).length,
       events: snapshot.events.filter((event) => sourceIds.has(event.sourceItemId) || inRange(event.eventDate ?? event.createdAt)).length
     }
-  }, [exportReady, fromDate, scope, snapshot, toDate])
+  }, [exportReady, fromDate, snapshot, toDate])
   const runExport = async (format: ExportRequest['format']): Promise<void> => {
     if (!exportReady) {
-      fail(new Error(rangeInvalid ? '开始日期不能晚于结束日期，请重新选择' : '请先选择开始日期和结束日期，或选择导出全部内容'))
+      fail(new Error(rangeInvalid ? '开始日期不能晚于结束日期，请重新选择' : '请先选择开始日期和结束日期'))
       return
     }
     setBusy(format)
     try {
       const result = await window.worklens.exportData({
         format,
-        fromDate: scope === 'range' ? fromDate : null,
-        toDate: scope === 'range' ? toDate : null,
+        fromDate,
+        toDate,
         includeAttachments: false
       })
       if (result.ok) notify(result.message)
@@ -1260,17 +1254,16 @@ function ExportPage({ snapshot, notify, fail }: { snapshot: AppSnapshot; notify:
     <div className="export-layout">
       <section className="export-config panel">
         <div className="panel-header"><div><h2>选择工作日期范围</h2><p>导出已有日报，不会再次调用 AI</p></div></div>
-        <div className="date-range"><label>开始日期<input type="date" value={fromDate} aria-invalid={rangeInvalid} onChange={(event) => { setFromDate(event.target.value); setScope('range') }} /></label><ArrowRight size={16} /><label>结束日期<input type="date" value={toDate} aria-invalid={rangeInvalid} onChange={(event) => { setToDate(event.target.value); setScope('range') }} /></label></div>
-        <div className={`export-range-status ${rangeInvalid ? 'error' : ''}`} role={rangeInvalid ? 'alert' : undefined}>{rangeInvalid ? '开始日期不能晚于结束日期' : scope === 'all' ? '当前将导出所有日期的内容' : rangeComplete ? `当前范围：${fromDate} 至 ${toDate}` : '请选择完整的开始与结束日期'}</div>
+        <div className="date-range"><label>开始日期<input type="date" value={fromDate} aria-invalid={rangeInvalid} onChange={(event) => setFromDate(event.target.value)} /></label><ArrowRight size={16} /><label>结束日期<input type="date" value={toDate} aria-invalid={rangeInvalid} onChange={(event) => setToDate(event.target.value)} /></label></div>
+        <div className={`export-range-status ${rangeInvalid ? 'error' : ''}`} role={rangeInvalid ? 'alert' : undefined}>{rangeInvalid ? '开始日期不能晚于结束日期' : rangeComplete ? `当前范围：${fromDate} 至 ${toDate}` : '请选择完整的开始与结束日期'}</div>
         <div className="export-preview"><div><FileText size={17} /><strong>{previewCounts?.sources ?? '—'}</strong><span>份资料</span></div><div><Clipboard size={17} /><strong>{previewCounts?.briefs ?? '—'}</strong><span>份日报</span></div><div><BriefcaseBusiness size={17} /><strong>{previewCounts?.events ?? '—'}</strong><span>个事项</span></div></div>
-        <button type="button" className={`export-all-option ${scope === 'all' ? 'selected' : ''}`} aria-pressed={scope === 'all'} onClick={() => setScope('all')}><div className="export-all-icon"><Database size={17} /></div><span><strong>导出全部内容</strong><small>包含所有日期</small></span>{scope === 'all' ? <CheckCircle2 size={17} /> : <ChevronRight size={17} />}</button>
       </section>
       <section className="format-grid three">
         {formats.map((item) => {
           const Icon = item.icon
           return <button className={`format-card ${!exportReady ? 'scope-required' : ''}`} aria-describedby={!exportReady ? 'export-scope-message' : undefined} key={item.id} onClick={() => void runExport(item.id)} disabled={Boolean(busy)}><div className="format-icon"><Icon size={22} /></div><div><h3>{item.title}</h3><p>{item.text}</p></div>{busy === item.id ? <LoaderCircle className="spin" size={18} /> : <ChevronRight size={18} />}</button>
         })}
-        {!exportReady && <p className="export-scope-message" id="export-scope-message">请先选择完整日期范围，或在左侧选择“导出全部内容”</p>}
+        {!exportReady && <p className="export-scope-message" id="export-scope-message">请先选择完整的开始与结束日期</p>}
       </section>
       <section className="backup-callout"><div className="backup-icon"><Database size={22} /></div><div><h3>创建完整本地备份</h3><p>包含所有日期、数据库、结构化数据与全部原始附件。</p></div><button className="secondary-button" disabled={Boolean(busy)} onClick={() => void backup()}>{busy === 'backup' ? <LoaderCircle className="spin" size={16} /> : <Archive size={16} />}立即备份</button></section>
     </div>
