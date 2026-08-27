@@ -72,6 +72,26 @@ describe('exporters', () => {
     ).toHaveLength(0)
   })
 
+  it('uses an inclusive date range for every exported collection', () => {
+    const exactDay = filterSnapshot(snapshot, {
+      format: 'pdf',
+      fromDate: '2026-07-15',
+      toDate: '2026-07-15',
+      includeAttachments: false
+    })
+    expect(exactDay.sources).toHaveLength(1)
+    expect(exactDay.dailyBriefs).toHaveLength(1)
+
+    const nextDay = filterSnapshot(snapshot, {
+      format: 'pdf',
+      fromDate: '2026-07-16',
+      toDate: '2026-07-16',
+      includeAttachments: false
+    })
+    expect(nextDay.sources).toHaveLength(0)
+    expect(nextDay.dailyBriefs).toHaveLength(0)
+  })
+
   it('renders traceable markdown sections', () => {
     const markdown = buildMarkdown(bundle)
     expect(markdown).toContain('# WorkLens 工作报告')

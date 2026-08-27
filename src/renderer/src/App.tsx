@@ -4,6 +4,7 @@ import {
   useMemo,
   useRef,
   useState,
+  type ClipboardEvent as ReactClipboardEvent,
   type Dispatch,
   type FormEvent,
   type ReactNode,
@@ -66,6 +67,7 @@ import type {
   CodexCliStatus,
   CursorCliStatus,
   DailyBrief,
+  DailyBriefImage,
   ExportRequest,
   ImportResult,
   JobProgressEvent,
@@ -102,6 +104,9 @@ const BATCH_FILE_EXTENSIONS = new Set([
 ])
 const MAX_BATCH_ITEMS = 200
 const MAX_BATCH_FILE_BYTES = 25 * 1024 * 1024
+const MAX_DAILY_BRIEF_IMAGES = 6
+const MAX_DAILY_BRIEF_IMAGE_BYTES = 5 * 1024 * 1024
+const DAILY_BRIEF_IMAGE_TYPES = new Set(['image/png', 'image/jpeg', 'image/webp', 'image/gif'])
 
 const EMPTY_SNAPSHOT: AppSnapshot = {
   sources: [],
@@ -849,6 +854,7 @@ function BriefsPage({ briefs, sources, selectedDate, setSelectedDate, onChanged,
   const [busy, setBusy] = useState(false)
   const [saving, setSaving] = useState(false)
   const [draftScript, setDraftScript] = useState('')
+  const [draftImages, setDraftImages] = useState<DailyBriefImage[]>([])
   const [dateMenuOpen, setDateMenuOpen] = useState(false)
   const dateMenuRef = useRef<HTMLDivElement>(null)
   const brief = briefs.find((item) => item.workDate === selectedDate) ?? null
@@ -857,6 +863,7 @@ function BriefsPage({ briefs, sources, selectedDate, setSelectedDate, onChanged,
 
   useEffect(() => {
     setDraftScript(brief?.script ?? '')
+    setDraftImages(brief?.images ?? [])
   }, [brief?.id, brief?.updatedAt, selectedDate])
 
   useEffect(() => {
@@ -892,9 +899,10 @@ function BriefsPage({ briefs, sources, selectedDate, setSelectedDate, onChanged,
     if (!brief || !draftScript.trim() || saving) return
     setSaving(true)
     try {
-      const input: UpdateDailyBriefInput = { briefId: brief.id, script: draftScript.trim(), images: brief.images ?? [] }
+      const input: UpdateDailyBriefInput = { briefId: brief.id, script: draftScript.trim(), images: draftImages }
       const updated = await window.worklens.updateDailyBrief(input)
       setDraftScript(updated.script)
+      setDraftImages(updated.images ?? [])
       await onChanged()
       notify('逐字稿修改已保存')
     } catch (error) {
@@ -903,6 +911,45 @@ function BriefsPage({ briefs, sources, selectedDate, setSelectedDate, onChanged,
       setSaving(false)
     }
   }
+  const pasteImages = async (event: ReactClipboardEvent<HTMLTextAreaElement>): Promise<void> => {
+    const imageFiles = Array.from(event.clipboardData.items)
+      .filter((item) => item.kind === 'file' && item.type.startsWith('image/'))
+      .map((item) => item.getAsFile())
+      .filter((file): file is File => Boolean(file))
+    if (!imageFiles.length) return
+
+    const unsupported = imageFiles.find((file) => !DAILY_BRIEF_IMAGE_TYPES.has(file.type))
+    if (unsupported) {
+      fail(new Error('暂不支持这种图片格式，请粘贴 PNG、JPG、WebP 或 GIF 图片'))
+      return
+    }
+    const oversized = imageFiles.find((file) => file.size > MAX_DAILY_BRIEF_IMAGE_BYTES)
+    if (oversized) {
+      fail(new Error(`图片“${oversized.name || '剪贴板图片'}”超过 5 MB，请压缩后再粘贴`))
+      return
+    }
+    const remaining = MAX_DAILY_BRIEF_IMAGES - draftImages.length
+    if (remaining <= 0) {
+      fail(new Error(`逐字稿最多保存 ${MAX_DAILY_BRIEF_IMAGES} 张图片，请先移除一张`))
+      return
+    }
+
+    try {
+      const accepted = imageFiles.slice(0, remaining)
+      const pastedImages = await Promise.all(accepted.map(async (file, index) => ({
+        id: crypto.randomUUID(),
+        name: file.name || `粘贴图片-${draftImages.length + index + 1}.${imageExtension(file.type)}`,
+        dataUrl: await readFileAsDataUrl(file)
+      })))
+      setDraftImages((current) => [...current, ...pastedImages])
+      notify(imageFiles.length > remaining
+        ? `已加入 ${pastedImages.length} 张图片；逐字稿最多保存 ${MAX_DAILY_BRIEF_IMAGES} 张`
+        : `已加入 ${pastedImages.length} 张图片，保存修改后生效`)
+    } catch (error) {
+      fail(error)
+    }
+  }
+  const imagesChanged = JSON.stringify(draftImages) !== JSON.stringify(brief?.images ?? [])
 
   return (
     <div className="brief-layout">
@@ -924,7 +971,7 @@ function BriefsPage({ briefs, sources, selectedDate, setSelectedDate, onChanged,
           <div className={`brief-date-menu ${dateMenuOpen ? 'open' : ''}`} ref={dateMenuRef}><button className="brief-date-trigger" aria-label="选择工作日期" aria-haspopup="listbox" aria-expanded={dateMenuOpen} onClick={() => setDateMenuOpen((open) => !open)}><CalendarDays size={15} /><span><strong>{friendlyDate(selectedDate)}</strong><small>{selectedDate}</small></span><ChevronDown size={14} /></button>{dateMenuOpen && <div className="brief-date-popover" role="listbox" aria-label="工作日期">{(availableDates.length ? availableDates : [selectedDate]).map((date) => { const selected = date === selectedDate; const count = sources.filter((source) => sourceDate(source) === date).length; return <button key={date} className={selected ? 'selected' : ''} role="option" aria-selected={selected} onClick={() => { setSelectedDate(date); setDateMenuOpen(false) }}><span><strong>{friendlyDate(date)}</strong><small>{date} · {count} 份资料</small></span>{selected && <Check size={14} />}</button> })}</div>}</div>
           <span>{sourceCount} 份原始资料</span>
           <button className="secondary-button" disabled={busy || saving || !sourceCount} onClick={() => void generate()}>{busy ? <LoaderCircle size={15} className="spin" /> : <RefreshCw size={15} />}{brief ? '重新生成' : '生成早会稿'}</button>
-          {brief && <button className="secondary-button" disabled={saving || !draftScript.trim() || draftScript.trim() === brief.script.trim()} onClick={() => void saveBrief()}>{saving ? <LoaderCircle size={15} className="spin" /> : <Save size={15} />}{saving ? '正在保存' : '保存修改'}</button>}
+          {brief && <button className="secondary-button" disabled={saving || !draftScript.trim() || (draftScript.trim() === brief.script.trim() && !imagesChanged)} onClick={() => void saveBrief()}>{saving ? <LoaderCircle size={15} className="spin" /> : <Save size={15} />}{saving ? '正在保存' : '保存修改'}</button>}
           {brief && <button className="primary-button" onClick={() => void copy()}><Copy size={15} />复制逐字稿</button>}
         </div>
 
@@ -933,8 +980,9 @@ function BriefsPage({ briefs, sources, selectedDate, setSelectedDate, onChanged,
             <article className="standup-script-card">
               <div className="script-card-head"><div><div className="eyebrow"><Clipboard size={14} />{brief.standupDate} 早会使用</div><h2>{brief.title}</h2><p>基于 {brief.workDate} 的 {brief.sourceItemIds.length} 份工作资料自动合并 · 可直接在下方编辑和粘贴</p></div><span>{estimateSpeakingTime(draftScript || brief.script)} 分钟</span></div>
               <div className="script-paper editing">
-                <textarea aria-label="逐字稿正文" value={draftScript} onChange={(event) => setDraftScript(event.target.value)} maxLength={50_000} />
-                {(brief.images ?? []).length > 0 && <div className="script-image-grid">{(brief.images ?? []).map((image) => <figure key={image.id}><img src={image.dataUrl} alt={image.name} /><figcaption>{image.name}</figcaption></figure>)}</div>}
+                <textarea aria-label="逐字稿正文" aria-describedby="script-paste-hint" value={draftScript} onChange={(event) => setDraftScript(event.target.value)} onPaste={(event) => void pasteImages(event)} maxLength={50_000} />
+                <div className="script-paste-hint" id="script-paste-hint"><Clipboard size={13} /><span>光标停在正文中即可直接粘贴图片，最多 {MAX_DAILY_BRIEF_IMAGES} 张；保存修改后生效</span><strong>{draftImages.length}/{MAX_DAILY_BRIEF_IMAGES}</strong></div>
+                {draftImages.length > 0 && <div className="script-image-grid">{draftImages.map((image) => <figure key={image.id}><img src={image.dataUrl} alt={image.name} /><figcaption>{image.name}</figcaption><button type="button" aria-label={`移除图片 ${image.name}`} onClick={() => setDraftImages((current) => current.filter((item) => item.id !== image.id))}><X size={14} /></button></figure>)}</div>}
               </div>
               <div className="script-meta"><span>{brief.provider} · {brief.model}</span><span>更新于 {formatTimestamp(brief.updatedAt)}</span></div>
             </article>
@@ -1146,12 +1194,44 @@ function EventsPage({ events, sources, initialSection = 'events', onSelectSource
 function ExportPage({ snapshot, notify, fail }: { snapshot: AppSnapshot; notify: (message: string) => void; fail: (error: unknown) => void }): ReactNode {
   const [fromDate, setFromDate] = useState('')
   const [toDate, setToDate] = useState('')
+  const [scope, setScope] = useState<'range' | 'all'>('range')
   const [busy, setBusy] = useState('')
-  const [includeAttachments, setIncludeAttachments] = useState(true)
+  const rangeComplete = Boolean(fromDate && toDate)
+  const rangeInvalid = rangeComplete && fromDate > toDate
+  const exportReady = scope === 'all' || (rangeComplete && !rangeInvalid)
+  const previewCounts = useMemo(() => {
+    if (!exportReady) return null
+    if (scope === 'all') return {
+      sources: snapshot.sources.length,
+      briefs: snapshot.dailyBriefs.length,
+      events: snapshot.events.length
+    }
+    const inRange = (value: string | null): boolean => {
+      if (!value) return false
+      const date = value.slice(0, 10)
+      return date >= fromDate && date <= toDate
+    }
+    const sources = snapshot.sources.filter((source) => inRange(source.businessDate ?? source.createdAt))
+    const sourceIds = new Set(sources.map((source) => source.id))
+    return {
+      sources: sources.length,
+      briefs: snapshot.dailyBriefs.filter((brief) => inRange(brief.workDate)).length,
+      events: snapshot.events.filter((event) => sourceIds.has(event.sourceItemId) || inRange(event.eventDate ?? event.createdAt)).length
+    }
+  }, [exportReady, fromDate, scope, snapshot, toDate])
   const runExport = async (format: ExportRequest['format']): Promise<void> => {
+    if (!exportReady) {
+      fail(new Error(rangeInvalid ? '开始日期不能晚于结束日期，请重新选择' : '请先选择开始日期和结束日期，或选择导出全部内容'))
+      return
+    }
     setBusy(format)
     try {
-      const result = await window.worklens.exportData({ format, fromDate: fromDate || null, toDate: toDate || null, includeAttachments })
+      const result = await window.worklens.exportData({
+        format,
+        fromDate: scope === 'range' ? fromDate : null,
+        toDate: scope === 'range' ? toDate : null,
+        includeAttachments: false
+      })
       if (result.ok) notify(result.message)
     } catch (error) {
       fail(error)
@@ -1173,25 +1253,26 @@ function ExportPage({ snapshot, notify, fail }: { snapshot: AppSnapshot; notify:
   const formats = [
     { id: 'markdown', title: '工作汇报 Markdown', text: '早会稿、日报、时间线与工作事项', icon: FileText },
     { id: 'pdf', title: '工作汇报 PDF', text: '适合周报、复盘和向上汇报', icon: Download },
-    { id: 'csv', title: '日报 CSV', text: '按日期导出完成、进展、风险和计划', icon: Clipboard },
-    { id: 'zip', title: '完整 ZIP', text: '结构化数据、报告、数据库与原始附件', icon: Archive }
+    { id: 'csv', title: '日报 CSV', text: '按日期导出完成、进展、风险和计划', icon: Clipboard }
   ] as const
 
   return (
     <div className="export-layout">
       <section className="export-config panel">
         <div className="panel-header"><div><h2>选择工作日期范围</h2><p>导出已有日报，不会再次调用 AI</p></div></div>
-        <div className="date-range"><label>开始日期<input type="date" value={fromDate} onChange={(event) => setFromDate(event.target.value)} /></label><ArrowRight size={16} /><label>结束日期<input type="date" value={toDate} onChange={(event) => setToDate(event.target.value)} /></label></div>
-        <label className="check-row"><input type="checkbox" checked={includeAttachments} onChange={(event) => setIncludeAttachments(event.target.checked)} /><span><strong>ZIP 中包含原始附件</strong><small>便于以后恢复完整工作空间</small></span></label>
-        <div className="export-preview"><div><FileText size={17} /><strong>{snapshot.sources.length}</strong><span>份资料</span></div><div><Clipboard size={17} /><strong>{snapshot.dailyBriefs.length}</strong><span>份日报</span></div><div><BriefcaseBusiness size={17} /><strong>{snapshot.events.length}</strong><span>个事项</span></div></div>
+        <div className="date-range"><label>开始日期<input type="date" value={fromDate} aria-invalid={rangeInvalid} onChange={(event) => { setFromDate(event.target.value); setScope('range') }} /></label><ArrowRight size={16} /><label>结束日期<input type="date" value={toDate} aria-invalid={rangeInvalid} onChange={(event) => { setToDate(event.target.value); setScope('range') }} /></label></div>
+        <div className={`export-range-status ${rangeInvalid ? 'error' : ''}`} role={rangeInvalid ? 'alert' : undefined}>{rangeInvalid ? '开始日期不能晚于结束日期' : scope === 'all' ? '当前将导出所有日期的内容' : rangeComplete ? `当前范围：${fromDate} 至 ${toDate}` : '请选择完整的开始与结束日期'}</div>
+        <div className="export-preview"><div><FileText size={17} /><strong>{previewCounts?.sources ?? '—'}</strong><span>份资料</span></div><div><Clipboard size={17} /><strong>{previewCounts?.briefs ?? '—'}</strong><span>份日报</span></div><div><BriefcaseBusiness size={17} /><strong>{previewCounts?.events ?? '—'}</strong><span>个事项</span></div></div>
+        <button type="button" className={`export-all-option ${scope === 'all' ? 'selected' : ''}`} aria-pressed={scope === 'all'} onClick={() => setScope('all')}><div className="export-all-icon"><Database size={17} /></div><span><strong>导出全部内容</strong><small>包含所有日期</small></span>{scope === 'all' ? <CheckCircle2 size={17} /> : <ChevronRight size={17} />}</button>
       </section>
-      <section className="format-grid">
+      <section className="format-grid three">
         {formats.map((item) => {
           const Icon = item.icon
-          return <button className="format-card" key={item.id} onClick={() => void runExport(item.id)} disabled={Boolean(busy)}><div className="format-icon"><Icon size={22} /></div><div><h3>{item.title}</h3><p>{item.text}</p></div>{busy === item.id ? <LoaderCircle className="spin" size={18} /> : <ChevronRight size={18} />}</button>
+          return <button className={`format-card ${!exportReady ? 'scope-required' : ''}`} aria-describedby={!exportReady ? 'export-scope-message' : undefined} key={item.id} onClick={() => void runExport(item.id)} disabled={Boolean(busy)}><div className="format-icon"><Icon size={22} /></div><div><h3>{item.title}</h3><p>{item.text}</p></div>{busy === item.id ? <LoaderCircle className="spin" size={18} /> : <ChevronRight size={18} />}</button>
         })}
+        {!exportReady && <p className="export-scope-message" id="export-scope-message">请先选择完整日期范围，或在左侧选择“导出全部内容”</p>}
       </section>
-      <section className="backup-callout"><div className="backup-icon"><Database size={22} /></div><div><h3>创建完整本地备份</h3><p>保存数据库、结构化日报和全部原始附件。</p></div><button className="secondary-button" disabled={Boolean(busy)} onClick={() => void backup()}>{busy === 'backup' ? <LoaderCircle className="spin" size={16} /> : <Archive size={16} />}立即备份</button></section>
+      <section className="backup-callout"><div className="backup-icon"><Database size={22} /></div><div><h3>创建完整本地备份</h3><p>包含所有日期、数据库、结构化数据与全部原始附件。</p></div><button className="secondary-button" disabled={Boolean(busy)} onClick={() => void backup()}>{busy === 'backup' ? <LoaderCircle className="spin" size={16} /> : <Archive size={16} />}立即备份</button></section>
     </div>
   )
 }
@@ -1545,6 +1626,21 @@ function todayLocal(): string {
 }
 function sourceDate(source: SourceItem): string {
   return (source.businessDate ?? source.createdAt).slice(0, 10)
+}
+function imageExtension(mimeType: string): string {
+  if (mimeType === 'image/jpeg') return 'jpg'
+  return mimeType.split('/')[1] ?? 'png'
+}
+function readFileAsDataUrl(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.addEventListener('load', () => {
+      if (typeof reader.result === 'string') resolve(reader.result)
+      else reject(new Error('无法读取剪贴板中的图片'))
+    })
+    reader.addEventListener('error', () => reject(reader.error ?? new Error('无法读取剪贴板中的图片')))
+    reader.readAsDataURL(file)
+  })
 }
 function friendlyDate(date: string): string {
   if (date === todayLocal()) return '今天'
