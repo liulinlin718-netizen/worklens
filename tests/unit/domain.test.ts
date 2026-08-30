@@ -5,6 +5,7 @@ import {
   deriveTitle,
   escapeCsv,
   inferDateFromText,
+  inferWorkDatesFromText,
   normalizeEntityKey,
   normalizeRequirementStatus,
   normalizeText,
@@ -26,6 +27,13 @@ describe('domain helpers', () => {
       precision: 'day'
     })
     expect(inferDateFromText('会议时间是 2026年2月31日')).toBeNull()
+  })
+
+  it('detects multi-day work-log headings without treating the upload day as a work date', () => {
+    const reference = new Date('2026-08-28T12:00:00Z')
+    const text = '6.15：完成登录页改版\n6.16（周二）继续接口联调\n计划 7 月 30 日上线'
+    expect(inferWorkDatesFromText(text, reference)).toEqual(['2026-06-15', '2026-06-16'])
+    expect(inferDateFromText(text, reference)).toBeNull()
   })
 
   it('normalizes entity keys across punctuation and case', () => {

@@ -20,6 +20,7 @@ export interface AnalysisRequest {
   text: string
   businessDate: string | null
   referenceDate: string
+  existingWorkItems: Array<{ key: string; title: string; latestDate: string | null; summary: string }>
 }
 
 export interface AnalysisResponse {

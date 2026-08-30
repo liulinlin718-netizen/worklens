@@ -181,19 +181,24 @@ function extractContent(body: OpenAiResponse): string {
 }
 
 function buildPrompt(request: AnalysisRequest): string {
+  const existingWorkItems = request.existingWorkItems.length
+    ? JSON.stringify(request.existingWorkItems, null, 2)
+    : '[]'
   return `当前日期：${request.referenceDate}
 资料标题：${request.title}
-用户手动日期：${request.businessDate ?? '未提供'}
+资料分组参考日期：${request.businessDate ?? '未提供'}
+已有工作事项：${existingWorkItems}
 
-把同一天的多份资料合并成工作日报，并生成可以在第二天早会上直接照着念的中文逐字稿。提取已完成、进行中、风险阻塞、下一步，以及值得保留在时间线中的工作事项。每个工作事项必须带 evidence 原文引用。不要生成需求清单，不要猜测。
+资料可能包含多个工作日。识别每段工作记录真正对应的工作日，保留跨日期的全部事件；同一事项同一天去重，跨日期事件使用相同 workItemKey。上传时间、截止日、计划上线日和预约日不能误当成工作记录时间戳。每个事件只带直接相关的短 evidence，不得引用整份跨日原文。不要生成需求清单，不要猜测。
 
 严格返回以下字段：
 - sourceDate: null 或 { value, precision, confidence, rationale }
-- events: { title, eventType, eventDate, datePrecision, summary, confidence, evidence: [{ quote, blockIndex }] }[]
+- events: { title, workItemKey, workItemTitle, eventType, eventDate, datePrecision, summary, confidence, evidence: [{ quote, blockIndex }] }[]
+- dailyBriefs: { workDate, title, overview, completed, inProgress, blockers, nextSteps, script }[]
 - summary: { title, content, highlights }
 - standup: { title, overview, completed, inProgress, blockers, nextSteps, script }
 
-standup.script 要自然、简洁、口语化，包含问候、昨天完成、当前进展、风险/协助、今天计划和收尾；不得机械复述字段名，也不能虚构工作。没有阻塞时明确说“目前没有明显阻塞”。
+优先复用已有事项的 key；workItemTitle 保持稳定。dailyBriefs 按每个明确工作日分别生成，script 只能包含对应日期。standup.script 要自然、简洁、口语化，包含问候、昨天完成、当前进展、风险/协助、今天计划和收尾；不得机械复述字段名，也不能虚构工作。没有阻塞时明确说“目前没有明显阻塞”。
 
 枚举：
 - precision: day | week | month | quarter | unknown

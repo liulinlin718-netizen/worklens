@@ -50,6 +50,7 @@ export interface SourceItem {
   error: string | null
   contentHash: string
   assetCount: number
+  workDates: string[]
   createdAt: string
   updatedAt: string
 }
@@ -87,6 +88,8 @@ export interface EvidenceLink {
 export interface WorkEvent {
   id: string
   title: string
+  workItemKey: string
+  workItemTitle: string
   eventType: string
   eventDate: string | null
   datePrecision: DatePrecision
@@ -97,6 +100,22 @@ export interface WorkEvent {
   evidence: EvidenceLink[]
   requirementIds: string[]
   createdAt: string
+  updatedAt: string
+}
+
+export interface WorkItem {
+  id: string
+  key: string
+  title: string
+  eventType: string
+  firstDate: string | null
+  latestDate: string | null
+  summary: string
+  confidence: number
+  evidence: EvidenceLink[]
+  sourceItemIds: string[]
+  eventIds: string[]
+  eventCount: number
   updatedAt: string
 }
 
@@ -248,6 +267,7 @@ export interface DashboardData {
 export interface AppSnapshot {
   sources: SourceItem[]
   events: WorkEvent[]
+  workItems: WorkItem[]
   dailyBriefs: DailyBrief[]
   dashboard: DashboardData
 }
@@ -365,6 +385,10 @@ export const StandupBriefSchema = z.object({
   script: z.string().trim().min(1).max(20_000)
 })
 
+export const DatedStandupBriefSchema = StandupBriefSchema.extend({
+  workDate: z.iso.date()
+})
+
 export const AnalysisResultSchema = z.object({
   sourceDate: z
     .object({
@@ -379,6 +403,8 @@ export const AnalysisResultSchema = z.object({
     .array(
       z.object({
         title: z.string().trim().min(1).max(200),
+        workItemKey: z.string().trim().max(160).optional().default(''),
+        workItemTitle: z.string().trim().max(200).optional().default(''),
         eventType: z.string().trim().min(1).max(80),
         eventDate: z.iso.date().nullable(),
         datePrecision: DatePrecisionSchema,
@@ -387,8 +413,9 @@ export const AnalysisResultSchema = z.object({
         evidence: z.array(EvidenceCandidateSchema).min(1).max(10)
       })
     )
-    .max(50)
+    .max(300)
     .default([]),
+  dailyBriefs: z.array(DatedStandupBriefSchema).max(60).optional().default([]),
   summary: z.object({
     title: z.string().trim().min(1).max(200),
     content: z.string().trim().min(1).max(10_000),
@@ -430,6 +457,9 @@ export interface WorkLensApi {
   importDroppedFiles(files: File[]): Promise<ImportResult>
   cancelImport(): Promise<ActionResult>
   retryImportSource(sourceItemId: string): Promise<ImportResult>
+  deleteSource(sourceItemId: string): Promise<ActionResult>
+  deleteWorkEvent(eventId: string): Promise<ActionResult>
+  deleteWorkItem(workItemKey: string): Promise<ActionResult>
   updateSourceDate(input: UpdateSourceDateInput): Promise<SourceItem>
   generateDailyBrief(workDate: string): Promise<ActionResult>
   updateDailyBrief(input: UpdateDailyBriefInput): Promise<DailyBrief>

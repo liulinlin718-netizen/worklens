@@ -3,6 +3,35 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { WorkLensDatabase } from '@core/storage/database'
+import type { AnalysisResult } from '@shared/contracts'
+
+function synthesis(events: AnalysisResult['events']): AnalysisResult {
+  const dates = Array.from(new Set(events.map((event) => event.eventDate).filter((date): date is string => Boolean(date))))
+  return {
+    sourceDate: null,
+    events,
+    dailyBriefs: dates.map((workDate) => ({
+      workDate,
+      title: `${workDate} 早会汇报`,
+      overview: `${workDate} 工作进展`,
+      completed: events.filter((event) => event.eventDate === workDate).map((event) => event.summary),
+      inProgress: [],
+      blockers: [],
+      nextSteps: [],
+      script: `${workDate} 工作进展已整理。`
+    })),
+    summary: { title: '工作摘要', content: '工作进展已整理。', highlights: [] },
+    standup: {
+      title: '早会汇报',
+      overview: '工作进展已整理。',
+      completed: events.map((event) => event.summary),
+      inProgress: [],
+      blockers: [],
+      nextSteps: [],
+      script: '大家早上好，工作进展已整理。'
+    }
+  }
+}
 
 describe('WorkLensDatabase', () => {
   let directory: string
@@ -203,6 +232,8 @@ describe('WorkLensDatabase', () => {
       events: [
         {
           title: '完成登录页改版',
+          workItemKey: 'login-page-redesign',
+          workItemTitle: '登录页改版',
           eventType: '交付',
           eventDate: '2026-07-17',
           datePrecision: 'day' as const,
@@ -211,6 +242,7 @@ describe('WorkLensDatabase', () => {
           evidence: [{ quote: '完成登录页改版', blockIndex: 0 }]
         }
       ],
+      dailyBriefs: [],
       summary: { title: '周五日报', content: '完成改版，等待权限。', highlights: [] },
       standup: {
         title: '周一早会汇报',
@@ -263,5 +295,171 @@ describe('WorkLensDatabase', () => {
       script: '人工修改并保存的逐字稿。',
       images: [{ name: '进度截图.png' }]
     })
+  })
+
+  it('keeps dated event history, aggregates one latest work item, and preserves remaining sources on deletion', () => {
+    const first = database.createSource({
+      title: '6 月 15 日登录页记录',
+      kind: 'text',
+      rawText: '6.15 完成登录页视觉改版。',
+      businessDate: null,
+      datePrecision: 'unknown',
+      dateOrigin: 'inferred',
+      contentHash: 'timeline-source-1'
+    })
+    const second = database.createSource({
+      title: '多日工作记录',
+      kind: 'text',
+      rawText: '6.15 登录页进入测试。\n6.16 修复登录页测试问题。',
+      businessDate: null,
+      datePrecision: 'unknown',
+      dateOrigin: 'inferred',
+      contentHash: 'timeline-source-2'
+    })
+
+    database.saveDailySynthesis([first.id], synthesis([{
+      title: '登录页完成视觉改版',
+      workItemKey: 'login-page-redesign',
+      workItemTitle: '登录页改版',
+      eventType: '交付',
+      eventDate: '2026-06-15',
+      datePrecision: 'day',
+      summary: '登录页视觉改版完成。',
+      confidence: 0.88,
+      evidence: [{ quote: '完成登录页视觉改版', blockIndex: 0 }]
+    }]), 'test', 'test-model', '2026-06-15')
+    database.saveDailySynthesis([second.id], synthesis([
+      {
+        title: '登录页进入测试',
+        workItemKey: 'login-page-redesign',
+        workItemTitle: '登录页改版',
+        eventType: '交付',
+        eventDate: '2026-06-15',
+        datePrecision: 'day',
+        summary: '登录页改版进入测试。',
+        confidence: 0.92,
+        evidence: [{ quote: '登录页进入测试', blockIndex: 0 }]
+      },
+      {
+        title: '登录页测试问题修复',
+        workItemKey: 'login-page-redesign',
+        workItemTitle: '登录页改版',
+        eventType: '问题修复',
+        eventDate: '2026-06-16',
+        datePrecision: 'day',
+        summary: '修复登录页测试问题。',
+        confidence: 0.94,
+        evidence: [{ quote: '修复登录页测试问题', blockIndex: 1 }]
+      }
+    ]), 'test', 'test-model', '2026-06-15')
+
+    const snapshot = database.getSnapshot()
+    expect(snapshot.events).toHaveLength(2)
+    expect(snapshot.events.find((event) => event.eventDate === '2026-06-15')?.evidence).toHaveLength(2)
+    expect(snapshot.workItems).toEqual([expect.objectContaining({
+      key: 'loginpageredesign',
+      title: '登录页改版',
+      firstDate: '2026-06-15',
+      latestDate: '2026-06-16',
+      summary: '修复登录页测试问题。',
+      eventCount: 2,
+      sourceItemIds: expect.arrayContaining([first.id, second.id])
+    })])
+    expect(database.getSource(second.id).workDates).toEqual(['2026-06-15', '2026-06-16'])
+
+    database.deleteSource(second.id)
+    const remaining = database.getSnapshot()
+    expect(remaining.sources.map((source) => source.id)).toEqual([first.id])
+    expect(remaining.events).toHaveLength(1)
+    expect(remaining.events[0]?.evidence).toEqual([expect.objectContaining({ sourceItemId: first.id })])
+    expect(remaining.workItems[0]).toMatchObject({ latestDate: '2026-06-15', eventCount: 1 })
+    expect(remaining.workItems[0]?.sourceItemIds).toEqual([first.id])
+  })
+
+  it('deletes one timeline event or an entire aggregated work item without deleting its source', () => {
+    const source = database.createSource({
+      title: '多项工作记录',
+      kind: 'text',
+      rawText: '完成登录页评审，随后进入测试；同时启动接口联调。',
+      businessDate: null,
+      datePrecision: 'unknown',
+      dateOrigin: 'inferred',
+      contentHash: 'delete-work-content-source'
+    })
+    database.saveDailySynthesis([source.id], synthesis([
+      {
+        title: '登录页完成评审',
+        workItemKey: 'login-page',
+        workItemTitle: '登录页改版',
+        eventType: '评审',
+        eventDate: '2026-06-15',
+        datePrecision: 'day',
+        summary: '登录页完成评审。',
+        confidence: 0.9,
+        evidence: [{ quote: '完成登录页评审', blockIndex: 0 }]
+      },
+      {
+        title: '登录页进入测试',
+        workItemKey: 'login-page',
+        workItemTitle: '登录页改版',
+        eventType: '验证',
+        eventDate: '2026-06-16',
+        datePrecision: 'day',
+        summary: '登录页进入测试。',
+        confidence: 0.92,
+        evidence: [{ quote: '随后进入测试', blockIndex: 0 }]
+      },
+      {
+        title: '接口联调启动',
+        workItemKey: 'api-integration',
+        workItemTitle: '接口联调',
+        eventType: '进行中',
+        eventDate: '2026-06-16',
+        datePrecision: 'day',
+        summary: '接口联调已经启动。',
+        confidence: 0.88,
+        evidence: [{ quote: '启动接口联调', blockIndex: 0 }]
+      }
+    ]), 'test', 'test-model', '2026-06-16')
+
+    const firstSnapshot = database.getSnapshot()
+    const firstLoginEvent = firstSnapshot.events.find((event) => event.title === '登录页完成评审')!
+    expect(database.deleteWorkEvent(firstLoginEvent.id)).toMatchObject({ title: '登录页完成评审', deletedCount: 1 })
+    expect(database.getSnapshot().workItems.find((item) => item.key === 'loginpage')).toMatchObject({ eventCount: 1 })
+
+    expect(database.deleteWorkItem('loginpage')).toMatchObject({ title: '登录页改版', deletedCount: 1 })
+    const remaining = database.getSnapshot()
+    expect(remaining.sources.map((item) => item.id)).toEqual([source.id])
+    expect(remaining.events.map((event) => event.title)).toEqual(['接口联调启动'])
+    expect(remaining.workItems.map((item) => item.title)).toEqual(['接口联调'])
+    expect(remaining.dailyBriefs).not.toHaveLength(0)
+  })
+
+  it('does not invent a timeline timestamp for an undated work item', () => {
+    const source = database.createSource({
+      title: '没有工作日期的记录',
+      kind: 'text',
+      rawText: '继续推进接口联调，目标下周五完成。',
+      businessDate: null,
+      datePrecision: 'unknown',
+      dateOrigin: 'inferred',
+      contentHash: 'undated-source'
+    })
+    database.saveDailySynthesis([source.id], synthesis([{
+      title: '继续接口联调',
+      workItemKey: 'api-integration',
+      workItemTitle: '接口联调',
+      eventType: '进行中',
+      eventDate: null,
+      datePrecision: 'unknown',
+      summary: '接口联调仍在推进。',
+      confidence: 0.72,
+      evidence: [{ quote: '继续推进接口联调', blockIndex: 0 }]
+    }]), 'test', 'test-model', '2026-08-28')
+
+    expect(database.listEvents()[0]?.eventDate).toBeNull()
+    expect(database.getSource(source.id).workDates).toEqual([])
+    expect(database.listDailyBriefs()).toEqual([])
+    expect(database.getSnapshot().dashboard.activity).toEqual([])
   })
 })

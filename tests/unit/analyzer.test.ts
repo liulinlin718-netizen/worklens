@@ -6,6 +6,7 @@ function analysis(overrides: Partial<AnalysisResult> = {}): AnalysisResult {
   return {
     sourceDate: null,
     events: [],
+    dailyBriefs: [],
     summary: { title: '摘要', content: '内容', highlights: [] },
     standup: {
       title: '明日早会汇报',
@@ -33,6 +34,8 @@ describe('analysis orchestration', () => {
         events: [
           {
             title: '登录页改版',
+            workItemKey: 'login-page-redesign',
+            workItemTitle: '登录页改版',
             eventType: '交付',
             eventDate: '2026-07-15',
             datePrecision: 'day',
@@ -46,6 +49,8 @@ describe('analysis orchestration', () => {
         events: [
           {
             title: '登录页-改版',
+            workItemKey: 'login-page-redesign',
+            workItemTitle: '登录页改版',
             eventType: '交付',
             eventDate: '2026-07-15',
             datePrecision: 'day',

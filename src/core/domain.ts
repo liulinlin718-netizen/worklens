@@ -47,6 +47,15 @@ export function normalizeEntityKey(title: string): string {
     .replace(/[^\p{L}\p{N}]+/gu, '')
 }
 
+export function deriveWorkItemKey(title: string): string {
+  const compact = title
+    .normalize('NFKC')
+    .toLocaleLowerCase('zh-CN')
+    .replace(/^(?:已|正在|继续|开始|完成|推进|跟进|处理|修复|优化|新增|实现|解决|等待)+/u, '')
+    .replace(/(?:已完成|完成|进展|推进中|进行中|待处理|已上线|已发布|进入测试|问题修复)$/u, '')
+  return normalizeEntityKey(compact) || normalizeEntityKey(title)
+}
+
 export function clampConfidence(value: unknown): number {
   const number = typeof value === 'number' && Number.isFinite(value) ? value : 0
   return Math.min(1, Math.max(0, number))
@@ -74,6 +83,11 @@ export function inferDateFromText(
   referenceDate = new Date()
 ): { value: string; precision: DatePrecision; rationale: string } | null {
   const normalized = normalizeText(text)
+  const workDates = inferWorkDatesFromText(normalized, referenceDate)
+  if (workDates.length === 1) {
+    return { value: workDates[0]!, precision: 'day', rationale: `识别到工作日期 ${workDates[0]}` }
+  }
+  if (workDates.length > 1) return null
   const fullDate = normalized.match(/\b(20\d{2})[-/.年](\d{1,2})[-/.月](\d{1,2})日?\b/)
   if (fullDate) {
     const [, year, month, day] = fullDate
@@ -95,6 +109,31 @@ export function inferDateFromText(
   }
 
   return null
+}
+
+export function inferWorkDatesFromText(text: string, referenceDate = new Date()): string[] {
+  const normalized = normalizeText(text)
+  const dates = new Set<string>()
+  const add = (year: number, month: number, day: number): void => {
+    const value = toIsoDate(year, month, day)
+    if (value) dates.add(value)
+  }
+  for (const line of normalized.split('\n')) {
+    const value = line.replace(/^\s*#{1,6}\s*/, '').trim()
+    const full = value.match(/^(20\d{2})[-/.年](\d{1,2})[-/.月](\d{1,2})日?(?:\s|[（(：:、—-]|$)/)
+    if (full) {
+      add(Number(full[1]), Number(full[2]), Number(full[3]))
+      continue
+    }
+    const chinese = value.match(/^(\d{1,2})月(\d{1,2})日?(?:\s|[（(：:、—-]|$)/)
+    if (chinese) {
+      add(referenceDate.getFullYear(), Number(chinese[1]), Number(chinese[2]))
+      continue
+    }
+    const compact = value.match(/^(\d{1,2})[./](\d{1,2})(?:\s|[（(：:、—-]|$)/)
+    if (compact) add(referenceDate.getFullYear(), Number(compact[1]), Number(compact[2]))
+  }
+  return Array.from(dates).sort()
 }
 
 function toIsoDate(year: number, month: number, day: number): string | null {
@@ -159,6 +198,9 @@ export function coerceAnalysisPayload(value: unknown): unknown {
     sourceDate: coerceSourceDate(input.sourceDate),
     events: Array.isArray(input.events)
       ? input.events.map((event) => coerceEvent(event)).filter(Boolean)
+      : [],
+    dailyBriefs: Array.isArray(input.dailyBriefs)
+      ? input.dailyBriefs.map((brief) => coerceDatedStandup(brief)).filter(Boolean)
       : [],
     summary,
     standup: coerceStandup(input.standup, summary)
@@ -233,6 +275,8 @@ function coerceEvent(value: unknown): unknown {
   if (!title || !summary) return null
   return {
     title,
+    workItemKey: firstString(record.workItemKey, record.topicKey, record.mergeKey) ?? '',
+    workItemTitle: firstString(record.workItemTitle, record.topicTitle) ?? '',
     eventType: firstString(record.eventType, record.type, record.kind) ?? 'meeting',
     eventDate: extractIsoDate(record.eventDate ?? record.date ?? record.day),
     datePrecision: normalizeDatePrecision(record.datePrecision ?? record.precision),
@@ -240,6 +284,18 @@ function coerceEvent(value: unknown): unknown {
     confidence: clampConfidence(record.confidence ?? 0.7),
     evidence: coerceEvidence(record.evidence)
   }
+}
+
+function coerceDatedStandup(value: unknown): unknown {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null
+  const record = value as Record<string, unknown>
+  const workDate = extractIsoDate(record.workDate ?? record.date)
+  if (!workDate) return null
+  const summary = {
+    title: firstString(record.title) ?? `${workDate} 工作日报`,
+    content: firstString(record.overview, record.content) ?? '当日工作内容已整理完成。'
+  }
+  return { workDate, ...(coerceStandup(record, summary) as Record<string, unknown>) }
 }
 
 function coerceRequirement(value: unknown): unknown {

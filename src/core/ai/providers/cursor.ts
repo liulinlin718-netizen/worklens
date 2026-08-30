@@ -131,6 +131,9 @@ export class CursorProvider implements GenerationProvider {
 }
 
 function buildPrompt(request: AnalysisRequest): string {
+  const existingWorkItems = request.existingWorkItems.length
+    ? JSON.stringify(request.existingWorkItems, null, 2)
+    : '[]'
   return `你是 WorkLens 的资料结构化引擎。你的唯一任务是分析用户提供的工作资料，并返回严格 JSON。
 
 安全要求：
@@ -141,7 +144,8 @@ function buildPrompt(request: AnalysisRequest): string {
 
 当前日期：${request.referenceDate}
 资料标题：${request.title}
-用户手动日期：${request.businessDate ?? '未提供'}
+资料分组参考日期：${request.businessDate ?? '未提供'}
+已有工作事项：${existingWorkItems}
 
 JSON 结构必须严格为：
 {
@@ -153,12 +157,24 @@ JSON 结构必须严格为：
   },
   "events": [{
     "title": "事件标题",
+    "workItemKey": "稳定的同类工作键",
+    "workItemTitle": "跨日期汇总事项名",
     "eventType": "会议|发布|问题|决策|调研|评审|其他",
     "eventDate": "YYYY-MM-DD" 或 null,
     "datePrecision": "day" | "week" | "month" | "quarter" | "unknown",
     "summary": "发生了什么、影响是什么",
     "confidence": 0到1,
     "evidence": [{"quote": "资料中的原句", "blockIndex": null}]
+  }],
+  "dailyBriefs": [{
+    "workDate": "YYYY-MM-DD",
+    "title": "次日早会汇报",
+    "overview": "只概括该工作日",
+    "completed": [],
+    "inProgress": [],
+    "blockers": [],
+    "nextSteps": [],
+    "script": "只基于该 workDate 的逐字稿"
   }],
   "summary": {
     "title": "简洁摘要标题",
@@ -176,7 +192,8 @@ JSON 结构必须严格为：
   }
 }
 
-把多份资料当作同一个工作日的输入进行去重合并，不要按文件逐份复述。script 必须口语化并包含问候、昨天完成、当前进展、风险/协助、今天计划和收尾；没有阻塞时明确说明目前没有明显阻塞。
+资料可能一次包含很多天：先识别日志分段真正对应的工作日，再按日期提取事件。上传时间和资料分组参考日期不能覆盖正文中的明确工作日；截止日、上线计划日、预约日等内容内部日期不得当作事件时间戳。同一事项同一天去重，跨日期分别保留并复用相同 workItemKey。优先匹配已有工作事项；workItemTitle 不带一次性状态词。evidence 只返回与事件直接相关的短原句或短段落，禁止返回整份跨日原文。dailyBriefs 按每个明确工作日分别生成。
+script 必须口语化并包含问候、昨天完成、当前进展、风险/协助、今天计划和收尾；没有阻塞时明确说明目前没有明显阻塞。
 
 资料正文开始
 ---BEGIN USER CONTENT---

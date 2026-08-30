@@ -105,16 +105,36 @@ export function filterSnapshot(snapshot: AppSnapshot, request: ExportRequest): A
     const date = value.slice(0, 10)
     return (!request.fromDate || date >= request.fromDate) && (!request.toDate || date <= request.toDate)
   }
-  const sources = snapshot.sources.filter((source) => inRange(source.businessDate ?? source.createdAt))
-  const sourceIds = new Set(sources.map((source) => source.id))
-  const events = snapshot.events.filter(
-    (event) => sourceIds.has(event.sourceItemId) || inRange(event.eventDate ?? event.createdAt)
+  const sources = snapshot.sources.filter((source) =>
+    source.workDates.length
+      ? source.workDates.some((date) => inRange(date))
+      : inRange(source.businessDate)
   )
+  const events = snapshot.events.filter((event) => inRange(event.eventDate))
+  const eventIds = new Set(events.map((event) => event.id))
+  const workItems = snapshot.workItems.flatMap((item) => {
+    const itemEvents = events.filter((event) => item.eventIds.includes(event.id))
+    if (!itemEvents.length) return []
+    const dates = itemEvents.map((event) => event.eventDate).filter((date): date is string => Boolean(date)).sort()
+    const evidence = item.evidence.filter((itemEvidence) => eventIds.has(itemEvidence.targetId))
+    const latest = [...itemEvents].sort((a, b) => (b.eventDate ?? b.updatedAt).localeCompare(a.eventDate ?? a.updatedAt))[0]!
+    return [{
+      ...item,
+      eventIds: itemEvents.map((event) => event.id),
+      eventCount: itemEvents.length,
+      firstDate: dates[0] ?? null,
+      latestDate: dates.at(-1) ?? null,
+      summary: latest.summary,
+      evidence,
+      sourceItemIds: Array.from(new Set(evidence.map((itemEvidence) => itemEvidence.sourceItemId)))
+    }]
+  })
   const dailyBriefs = snapshot.dailyBriefs.filter((brief) => inRange(brief.workDate))
   return {
     ...snapshot,
     sources,
     events,
+    workItems,
     dailyBriefs,
     dashboard: {
       ...snapshot.dashboard,
@@ -223,10 +243,15 @@ async function writeAtomic(targetPath: string, content: string): Promise<void> {
 }
 
 function sourceMarkdown(source: SourceItem): string[] {
+  const workDates = source.workDates.length
+    ? source.workDates.length === 1
+      ? source.workDates[0]
+      : `${source.workDates[0]} — ${source.workDates.at(-1)}（${source.workDates.length} 天）`
+    : '日期待确认'
   return [
-    `### ${source.businessDate ?? source.createdAt.slice(0, 10)} · ${source.title}`,
+    `### ${source.title}`,
     '',
-    `类型：${source.kind} · 状态：${source.status}`,
+    `类型：${source.kind} · 状态：${source.status} · 上传时间：${source.createdAt} · 涉及工作日：${workDates}`,
     '',
     source.excerpt,
     ''

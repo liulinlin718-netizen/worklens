@@ -22,10 +22,12 @@ import type {
   SourceKind,
   Summary,
   UpdateDailyBriefInput,
-  WorkEvent
+  WorkEvent,
+  WorkItem
 } from '@shared/contracts'
 import {
   clampConfidence,
+  deriveWorkItemKey,
   excerpt,
   newId,
   normalizeEntityKey,
@@ -88,6 +90,17 @@ export interface AssetPathRecord {
 export interface AssetLocationRecord extends AssetPathRecord {
   id: string
   mimeType: string
+}
+
+export interface DeleteSourceRecord {
+  title: string
+  assetPaths: string[]
+  affectedWorkDates: string[]
+}
+
+export interface DeleteWorkContentRecord {
+  title: string
+  deletedCount: number
 }
 
 export class WorkLensDatabase {
@@ -164,6 +177,8 @@ export class WorkLensDatabase {
         id TEXT PRIMARY KEY,
         entity_key TEXT NOT NULL,
         title TEXT NOT NULL,
+        work_item_key TEXT NOT NULL DEFAULT '',
+        work_item_title TEXT NOT NULL DEFAULT '',
         event_type TEXT NOT NULL,
         event_date TEXT,
         date_precision TEXT NOT NULL DEFAULT 'unknown',
@@ -329,6 +344,20 @@ export class WorkLensDatabase {
     }
     this.db.exec("INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (3, datetime('now'))")
 
+    const eventColumns = this.db.prepare('PRAGMA table_info(events)').all() as Row[]
+    if (!eventColumns.some((column) => String(column.name) === 'work_item_key')) {
+      this.db.exec("ALTER TABLE events ADD COLUMN work_item_key TEXT NOT NULL DEFAULT ''")
+    }
+    if (!eventColumns.some((column) => String(column.name) === 'work_item_title')) {
+      this.db.exec("ALTER TABLE events ADD COLUMN work_item_title TEXT NOT NULL DEFAULT ''")
+    }
+    this.db.exec(`
+      UPDATE events SET work_item_key = entity_key WHERE work_item_key = '';
+      UPDATE events SET work_item_title = title WHERE work_item_title = '';
+      CREATE INDEX IF NOT EXISTS idx_events_work_item ON events(work_item_key, event_date DESC);
+      INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (4, datetime('now'));
+    `)
+
     try {
       this.db.exec(`
         CREATE VIRTUAL TABLE IF NOT EXISTS search_index USING fts5(
@@ -403,7 +432,7 @@ export class WorkLensDatabase {
       `)
       .get(id) as Row | undefined
     if (!row) throw new Error('记录不存在')
-    return mapSource(row)
+    return this.withSourceWorkDates(mapSource(row))
   }
 
   findSourceByContentHash(contentHash: string): SourceItem | null {
@@ -418,7 +447,7 @@ export class WorkLensDatabase {
         LIMIT 1
       `)
       .get(contentHash) as Row | undefined
-    return row ? mapSource(row) : null
+    return row ? this.withSourceWorkDates(mapSource(row)) : null
   }
 
   getSourceText(id: string): string {
@@ -440,7 +469,7 @@ export class WorkLensDatabase {
           ORDER BY COALESCE(s.business_date, substr(s.created_at, 1, 10)) DESC, s.created_at DESC
         `)
         .all() as Row[]
-    ).map(mapSource)
+    ).map(mapSource).map((source) => this.withSourceWorkDates(source))
   }
 
   listSourcesForDate(workDate: string): SourceItem[] {
@@ -450,12 +479,38 @@ export class WorkLensDatabase {
           SELECT s.*, COUNT(a.id) AS asset_count
           FROM source_items s
           LEFT JOIN assets a ON a.source_item_id = s.id
-          WHERE COALESCE(s.business_date, substr(s.created_at, 1, 10)) = ?
+          WHERE s.business_date = ?
+             OR s.id IN (
+               SELECT e.source_item_id FROM events e WHERE e.event_date = ?
+               UNION
+               SELECT l.source_item_id
+               FROM evidence_links l
+               JOIN events e ON l.target_type = 'event' AND l.target_id = e.id
+               WHERE e.event_date = ?
+             )
           GROUP BY s.id
           ORDER BY s.created_at ASC
         `)
-        .all(workDate) as Row[]
-    ).map(mapSource)
+        .all(workDate, workDate, workDate) as Row[]
+    ).map(mapSource).map((source) => this.withSourceWorkDates(source))
+  }
+
+  private withSourceWorkDates(source: SourceItem): SourceItem {
+    const rows = this.db
+      .prepare(`
+        SELECT DISTINCT e.event_date AS work_date
+        FROM events e
+        LEFT JOIN evidence_links l
+          ON l.target_type = 'event' AND l.target_id = e.id
+        WHERE e.event_date IS NOT NULL
+          AND (e.source_item_id = ? OR l.source_item_id = ?)
+        ORDER BY e.event_date
+      `)
+      .all(source.id, source.id) as Row[]
+    return {
+      ...source,
+      workDates: rows.map((row) => String(row.work_date)).filter(Boolean)
+    }
   }
 
   setSourceStatus(id: string, status: ProcessingStatus, error: string | null = null): void {
@@ -652,6 +707,73 @@ export class WorkLensDatabase {
       : null
   }
 
+  deleteSource(sourceItemId: string): DeleteSourceRecord {
+    const source = this.getSource(sourceItemId)
+    const assetPaths = (this.db
+      .prepare('SELECT local_path FROM assets WHERE source_item_id = ?')
+      .all(sourceItemId) as Row[]).map((row) => String(row.local_path))
+    const affectedWorkDates = new Set(source.workDates)
+    if (source.businessDate) affectedWorkDates.add(source.businessDate)
+    this.transaction(() => {
+      this.removeGeneratedEventContributions([sourceItemId], affectedWorkDates)
+      const briefs = this.db.prepare('SELECT id, work_date, source_item_ids_json FROM daily_briefs').all() as Row[]
+      for (const brief of briefs) {
+        const sourceIds = parseStringArray(String(brief.source_item_ids_json))
+        if (!sourceIds.includes(sourceItemId)) continue
+        const id = String(brief.id)
+        affectedWorkDates.add(String(brief.work_date))
+        this.db.prepare("DELETE FROM search_index WHERE entity_type = 'brief' AND entity_id = ?").run(id)
+        this.db.prepare('DELETE FROM daily_briefs WHERE id = ?').run(id)
+      }
+      const requirements = this.db
+        .prepare('SELECT id FROM requirements WHERE source_item_id = ?')
+        .all(sourceItemId) as Row[]
+      for (const requirement of requirements) {
+        const id = String(requirement.id)
+        this.db.prepare("DELETE FROM evidence_links WHERE target_type = 'requirement' AND target_id = ?").run(id)
+        this.db.prepare("DELETE FROM entity_relations WHERE (from_type = 'requirement' AND from_id = ?) OR (to_type = 'requirement' AND to_id = ?)").run(id, id)
+        this.db.prepare("DELETE FROM search_index WHERE entity_type = 'requirement' AND entity_id = ?").run(id)
+      }
+      this.db.prepare('DELETE FROM requirements WHERE source_item_id = ?').run(sourceItemId)
+      const summaries = this.db.prepare('SELECT id FROM summaries WHERE source_item_id = ?').all(sourceItemId) as Row[]
+      for (const summary of summaries) {
+        const id = String(summary.id)
+        this.db.prepare("DELETE FROM evidence_links WHERE target_type = 'summary' AND target_id = ?").run(id)
+        this.db.prepare("DELETE FROM search_index WHERE entity_type = 'summary' AND entity_id = ?").run(id)
+      }
+      this.db.prepare('DELETE FROM summaries WHERE source_item_id = ?').run(sourceItemId)
+      this.db.prepare('DELETE FROM revisions WHERE entity_id = ?').run(sourceItemId)
+      this.db.prepare("DELETE FROM search_index WHERE entity_type = 'source' AND entity_id = ?").run(sourceItemId)
+      this.db.prepare('DELETE FROM source_items WHERE id = ?').run(sourceItemId)
+    })
+    return { title: source.title, assetPaths, affectedWorkDates: Array.from(affectedWorkDates).sort() }
+  }
+
+  deleteWorkEvent(eventId: string): DeleteWorkContentRecord {
+    const row = this.db
+      .prepare('SELECT id, title FROM events WHERE id = ?')
+      .get(eventId) as Row | undefined
+    if (!row) throw new Error('这条工作内容不存在或已被删除')
+    this.transaction(() => this.deleteEventRow(eventId))
+    return { title: String(row.title), deletedCount: 1 }
+  }
+
+  deleteWorkItem(workItemKey: string): DeleteWorkContentRecord {
+    const rows = this.db
+      .prepare(`
+        SELECT id, COALESCE(NULLIF(work_item_title, ''), title) AS title
+        FROM events
+        WHERE work_item_key = ?
+        ORDER BY COALESCE(event_date, created_at) DESC, updated_at DESC
+      `)
+      .all(workItemKey) as Row[]
+    if (!rows.length) throw new Error('这个工作事项不存在或已被删除')
+    this.transaction(() => {
+      for (const row of rows) this.deleteEventRow(String(row.id))
+    })
+    return { title: String(rows[0]!.title), deletedCount: rows.length }
+  }
+
   listEvents(): WorkEvent[] {
     const rows = this.db.prepare('SELECT * FROM events ORDER BY event_date DESC, created_at DESC').all() as Row[]
     return rows.map((row) =>
@@ -661,6 +783,40 @@ export class WorkLensDatabase {
         this.listRelatedIds('event', String(row.id), 'requirement')
       )
     )
+  }
+
+  listWorkItems(): WorkItem[] {
+    const groups = new Map<string, WorkEvent[]>()
+    for (const event of this.listEvents()) {
+      const key = event.workItemKey || deriveWorkItemKey(event.workItemTitle || event.title)
+      groups.set(key, [...(groups.get(key) ?? []), event])
+    }
+    return Array.from(groups, ([key, events]) => {
+      const ordered = [...events].sort((a, b) =>
+        (b.eventDate ?? b.updatedAt).localeCompare(a.eventDate ?? a.updatedAt) ||
+        b.updatedAt.localeCompare(a.updatedAt)
+      )
+      const latest = ordered[0]!
+      const dated = ordered.map((event) => event.eventDate).filter((date): date is string => Boolean(date)).sort()
+      const evidence = Array.from(
+        new Map(ordered.flatMap((event) => event.evidence).map((item) => [`${item.sourceItemId}:${item.quote}`, item])).values()
+      )
+      return {
+        id: key,
+        key,
+        title: latest.workItemTitle || latest.title,
+        eventType: latest.eventType,
+        firstDate: dated[0] ?? null,
+        latestDate: dated.at(-1) ?? null,
+        summary: latest.summary,
+        confidence: Math.max(...ordered.map((event) => event.confidence)),
+        evidence,
+        sourceItemIds: Array.from(new Set(evidence.map((item) => item.sourceItemId))),
+        eventIds: ordered.map((event) => event.id),
+        eventCount: ordered.length,
+        updatedAt: ordered.map((event) => event.updatedAt).sort().at(-1) ?? latest.updatedAt
+      }
+    }).sort((a, b) => (b.latestDate ?? b.updatedAt).localeCompare(a.latestDate ?? a.updatedAt))
   }
 
   listRequirements(): Requirement[] {
@@ -722,18 +878,23 @@ export class WorkLensDatabase {
     provider: string,
     model: string,
     workDate: string
-  ): DailyBrief {
+  ): DailyBrief | null {
     const uniqueSourceIds = Array.from(new Set(sourceItemIds))
     if (!uniqueSourceIds.length) throw new Error('日报至少需要一条原始资料')
     const primarySourceId = uniqueSourceIds[0]!
+    const savedBriefDates: string[] = []
+    const sourcePlaceholders = uniqueSourceIds.map(() => '?').join(', ')
+    const requestedDateIsExplicit = Number((this.db
+      .prepare(`SELECT COUNT(*) AS count FROM source_items WHERE id IN (${sourcePlaceholders}) AND business_date = ?`)
+      .get(...uniqueSourceIds, workDate) as Row).count) > 0
 
     this.transaction(() => {
-      this.removeGeneratedEventsForDate(workDate)
+      this.removeGeneratedEventContributions(uniqueSourceIds)
       for (const event of result.events) {
         const payload: Record<string, unknown> = {
           ...event,
-          eventDate: event.eventDate ?? workDate,
-          datePrecision: event.eventDate ? event.datePrecision : 'day'
+          eventDate: event.eventDate,
+          datePrecision: event.eventDate ? event.datePrecision : 'unknown'
         }
         const eventId = this.createOrMergeEvent(primarySourceId, payload)
         if (Array.isArray(payload.evidence)) {
@@ -743,69 +904,84 @@ export class WorkLensDatabase {
           }
         }
       }
-
-      const existing = this.db
-        .prepare('SELECT id, created_at FROM daily_briefs WHERE work_date = ?')
-        .get(workDate) as Row | undefined
-      const id = existing ? String(existing.id) : newId()
-      const createdAt = existing ? String(existing.created_at) : nowIso()
-      const updatedAt = nowIso()
-      this.db
-        .prepare(`
-          INSERT INTO daily_briefs(
-            id, work_date, standup_date, title, overview, script,
-            completed_json, in_progress_json, blockers_json, next_steps_json,
-            source_item_ids_json, provider, model, created_at, updated_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-          ON CONFLICT(work_date) DO UPDATE SET
-            standup_date = excluded.standup_date,
-            title = excluded.title,
-            overview = excluded.overview,
-            script = excluded.script,
-            completed_json = excluded.completed_json,
-            in_progress_json = excluded.in_progress_json,
-            blockers_json = excluded.blockers_json,
-            next_steps_json = excluded.next_steps_json,
-            source_item_ids_json = excluded.source_item_ids_json,
-            provider = excluded.provider,
-            model = excluded.model,
-            updated_at = excluded.updated_at
-        `)
-        .run(
-          id,
-          workDate,
-          nextWorkday(workDate),
-          result.standup.title,
-          result.standup.overview,
-          result.standup.script,
-          JSON.stringify(result.standup.completed),
-          JSON.stringify(result.standup.inProgress),
-          JSON.stringify(result.standup.blockers),
-          JSON.stringify(result.standup.nextSteps),
-          JSON.stringify(uniqueSourceIds),
-          provider,
-          model,
-          createdAt,
-          updatedAt
-        )
-      this.upsertSearch(
-        'brief',
-        id,
-        result.standup.title,
-        [
-          result.standup.overview,
-          result.standup.script,
-          ...result.standup.completed,
-          ...result.standup.inProgress,
-          ...result.standup.blockers,
-          ...result.standup.nextSteps
-        ].join('\n')
-      )
+      const eventDates = Array.from(new Set(result.events.map((event) => event.eventDate).filter((date): date is string => Boolean(date)))).sort()
+      const datedBriefs = result.dailyBriefs.length
+        ? result.dailyBriefs
+        : eventDates.length === 1
+          ? [{ workDate: eventDates[0]!, ...result.standup }]
+          : eventDates.length > 1
+            ? eventDates.map((date) => fallbackStandupForEvents(date, result.events.filter((event) => event.eventDate === date)))
+            : requestedDateIsExplicit
+              ? [{ workDate, ...result.standup }]
+              : []
+      for (const brief of datedBriefs) {
+        this.saveDailyBriefRow(uniqueSourceIds, brief, provider, model)
+        savedBriefDates.push(brief.workDate)
+      }
       for (const sourceItemId of uniqueSourceIds) {
         this.setSourceStatus(sourceItemId, 'ready')
       }
     })
-    return this.getDailyBrief(workDate)!
+    const returnDate = savedBriefDates.includes(workDate) ? workDate : savedBriefDates[0]
+    return returnDate ? this.getDailyBrief(returnDate) : null
+  }
+
+  private saveDailyBriefRow(
+    sourceItemIds: string[],
+    brief: AnalysisResult['dailyBriefs'][number],
+    provider: string,
+    model: string
+  ): void {
+    const existing = this.db
+      .prepare('SELECT id, created_at FROM daily_briefs WHERE work_date = ?')
+      .get(brief.workDate) as Row | undefined
+    const id = existing ? String(existing.id) : newId()
+    const createdAt = existing ? String(existing.created_at) : nowIso()
+    const updatedAt = nowIso()
+    this.db
+      .prepare(`
+        INSERT INTO daily_briefs(
+          id, work_date, standup_date, title, overview, script,
+          completed_json, in_progress_json, blockers_json, next_steps_json,
+          source_item_ids_json, provider, model, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(work_date) DO UPDATE SET
+          standup_date = excluded.standup_date,
+          title = excluded.title,
+          overview = excluded.overview,
+          script = excluded.script,
+          completed_json = excluded.completed_json,
+          in_progress_json = excluded.in_progress_json,
+          blockers_json = excluded.blockers_json,
+          next_steps_json = excluded.next_steps_json,
+          source_item_ids_json = excluded.source_item_ids_json,
+          provider = excluded.provider,
+          model = excluded.model,
+          updated_at = excluded.updated_at
+      `)
+      .run(
+        id,
+        brief.workDate,
+        nextWorkday(brief.workDate),
+        brief.title,
+        brief.overview,
+        brief.script,
+        JSON.stringify(brief.completed),
+        JSON.stringify(brief.inProgress),
+        JSON.stringify(brief.blockers),
+        JSON.stringify(brief.nextSteps),
+        JSON.stringify(sourceItemIds),
+        provider,
+        model,
+        createdAt,
+        updatedAt
+      )
+    this.upsertSearch(
+      'brief',
+      id,
+      brief.title,
+      [brief.overview, brief.script, ...brief.completed, ...brief.inProgress, ...brief.blockers, ...brief.nextSteps].join('\n')
+    )
   }
 
   clearDailySynthesisForDate(workDate: string): void {
@@ -1044,14 +1220,21 @@ export class WorkLensDatabase {
     const candidates: KnowledgeContextItem[] = []
 
     for (const source of this.listSources()) {
-      candidates.push({
-        refId: `source:${source.id}`,
-        entityType: 'source',
-        entityId: source.id,
-        title: source.title,
-        date: (source.businessDate ?? source.createdAt).slice(0, 10),
-        content: source.rawText
-      })
+      const workDates = source.workDates.length
+        ? source.workDates
+        : source.businessDate
+          ? [source.businessDate]
+          : [null]
+      for (const workDate of workDates) {
+        candidates.push({
+          refId: `source:${source.id}`,
+          entityType: 'source',
+          entityId: source.id,
+          title: source.title,
+          date: workDate,
+          content: source.rawText
+        })
+      }
     }
     for (const brief of this.listDailyBriefs()) {
       candidates.push({
@@ -1085,7 +1268,7 @@ export class WorkLensDatabase {
         entityType: 'event',
         entityId: id,
         title: String(row.title),
-        date: String(row.event_date ?? row.created_at).slice(0, 10),
+        date: row.event_date ? String(row.event_date).slice(0, 10) : null,
         content: `${String(row.event_type)}：${String(row.summary)}`
       })
     }
@@ -1104,14 +1287,17 @@ export class WorkLensDatabase {
           .slice(0, Math.min(maxItems, 16))
           .map((item) => ({ item, score: 0 }))
     const result: KnowledgeContextItem[] = []
+    const includedRefIds = new Set<string>()
     let totalCharacters = 0
     for (const { item } of selected) {
       if (result.length >= maxItems || totalCharacters >= 72_000) break
+      if (includedRefIds.has(item.refId)) continue
       const perItemLimit = item.entityType === 'source' ? 7_000 : item.entityType === 'brief' ? 4_500 : 2_000
       const content = clipKnowledgeContent(item.content, terms, perItemLimit)
       if (!content.trim()) continue
       if (totalCharacters + content.length > 72_000 && result.length) continue
       result.push({ ...item, content })
+      includedRefIds.add(item.refId)
       totalCharacters += content.length
     }
     return result
@@ -1120,10 +1306,12 @@ export class WorkLensDatabase {
   getSnapshot(): AppSnapshot {
     const sources = this.listSources()
     const events = this.listEvents()
+    const workItems = this.listWorkItems()
     const dailyBriefs = this.listDailyBriefs()
     return {
       sources,
       events,
+      workItems,
       dailyBriefs,
       dashboard: buildDashboard(sources, events, dailyBriefs)
     }
@@ -1203,10 +1391,12 @@ export class WorkLensDatabase {
     const title = String(payload.title ?? '').trim()
     if (!title) throw new Error('事件标题不能为空')
     const key = normalizeEntityKey(title)
+    const workItemTitle = String(payload.workItemTitle ?? '').trim() || title
+    const workItemKey = normalizeEntityKey(String(payload.workItemKey ?? '')) || deriveWorkItemKey(workItemTitle)
     const eventDate = nullableString(payload.eventDate)
     const existing = this.db
-      .prepare('SELECT * FROM events WHERE entity_key = ? AND COALESCE(event_date, ?) = COALESCE(?, ?) LIMIT 1')
-      .get(key, eventDate ?? '', eventDate, eventDate ?? '') as Row | undefined
+      .prepare('SELECT * FROM events WHERE work_item_key = ? AND COALESCE(event_date, ?) = COALESCE(?, ?) LIMIT 1')
+      .get(workItemKey, eventDate ?? '', eventDate, eventDate ?? '') as Row | undefined
     const summary = String(payload.summary ?? '').trim()
     const time = nowIso()
     if (existing) {
@@ -1217,11 +1407,13 @@ export class WorkLensDatabase {
         this.db
           .prepare(`
             UPDATE events
-            SET event_type = ?, event_date = COALESCE(event_date, ?), date_precision = ?,
+            SET title = ?, work_item_title = ?, event_type = ?, event_date = COALESCE(event_date, ?), date_precision = ?,
                 summary = ?, confidence = MAX(confidence, ?), updated_at = ?
             WHERE id = ?
           `)
           .run(
+            title,
+            workItemTitle,
             String(payload.eventType ?? '其他'),
             eventDate,
             asDatePrecision(payload.datePrecision),
@@ -1239,14 +1431,16 @@ export class WorkLensDatabase {
     this.db
       .prepare(`
         INSERT INTO events(
-          id, entity_key, title, event_type, event_date, date_precision, summary,
+          id, entity_key, title, work_item_key, work_item_title, event_type, event_date, date_precision, summary,
           source_item_id, confidence, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `)
       .run(
         id,
         key,
         title,
+        workItemKey,
+        workItemTitle,
         String(payload.eventType ?? '其他'),
         eventDate,
         asDatePrecision(payload.datePrecision),
@@ -1265,18 +1459,52 @@ export class WorkLensDatabase {
       .prepare('SELECT id FROM events WHERE event_date = ? AND manual_locked = 0')
       .all(workDate) as Row[]
     for (const row of rows) {
-      const id = String(row.id)
-      this.db
-        .prepare("DELETE FROM evidence_links WHERE target_type = 'event' AND target_id = ?")
-        .run(id)
-      this.db
-        .prepare("DELETE FROM entity_relations WHERE (from_type = 'event' AND from_id = ?) OR (to_type = 'event' AND to_id = ?)")
-        .run(id, id)
-      this.db
-        .prepare("DELETE FROM search_index WHERE entity_type = 'event' AND entity_id = ?")
-        .run(id)
-      this.db.prepare('DELETE FROM events WHERE id = ?').run(id)
+      this.deleteEventRow(String(row.id))
     }
+  }
+
+  private removeGeneratedEventContributions(
+    sourceItemIds: string[],
+    affectedDates = new Set<string>()
+  ): void {
+    if (!sourceItemIds.length) return
+    const placeholders = sourceItemIds.map(() => '?').join(', ')
+    const rows = this.db
+      .prepare(`
+        SELECT DISTINCT e.id, e.event_date, e.source_item_id
+        FROM events e
+        LEFT JOIN evidence_links l
+          ON l.target_type = 'event' AND l.target_id = e.id
+        WHERE e.source_item_id IN (${placeholders}) OR l.source_item_id IN (${placeholders})
+      `)
+      .all(...sourceItemIds, ...sourceItemIds) as Row[]
+    this.db
+      .prepare(`DELETE FROM evidence_links WHERE target_type = 'event' AND source_item_id IN (${placeholders})`)
+      .run(...sourceItemIds)
+    for (const row of rows) {
+      const eventId = String(row.id)
+      if (row.event_date) affectedDates.add(String(row.event_date))
+      const remaining = this.db
+        .prepare("SELECT source_item_id FROM evidence_links WHERE target_type = 'event' AND target_id = ? ORDER BY created_at LIMIT 1")
+        .get(eventId) as Row | undefined
+      if (!remaining) {
+        this.deleteEventRow(eventId)
+        continue
+      }
+      if (sourceItemIds.includes(String(row.source_item_id))) {
+        this.db.prepare('UPDATE events SET source_item_id = ?, updated_at = ? WHERE id = ?')
+          .run(String(remaining.source_item_id), nowIso(), eventId)
+      }
+    }
+  }
+
+  private deleteEventRow(eventId: string): void {
+    this.db.prepare("DELETE FROM evidence_links WHERE target_type = 'event' AND target_id = ?").run(eventId)
+    this.db
+      .prepare("DELETE FROM entity_relations WHERE (from_type = 'event' AND from_id = ?) OR (to_type = 'event' AND to_id = ?)")
+      .run(eventId, eventId)
+    this.db.prepare("DELETE FROM search_index WHERE entity_type = 'event' AND entity_id = ?").run(eventId)
+    this.db.prepare('DELETE FROM events WHERE id = ?').run(eventId)
   }
 
   private createOrMergeRequirement(sourceItemId: string, payload: Record<string, unknown>): string {
@@ -1539,8 +1767,23 @@ export class WorkLensDatabase {
   }
 
   private getEntityDate(entityType: string, entityId: string): string | null {
+    if (entityType === 'source') {
+      const row = this.db
+        .prepare(`
+          SELECT COALESCE(
+            MAX(e.event_date),
+            (SELECT business_date FROM source_items WHERE id = ?)
+          ) AS value
+          FROM events e
+          LEFT JOIN evidence_links l
+            ON l.target_type = 'event' AND l.target_id = e.id
+          WHERE e.event_date IS NOT NULL
+            AND (e.source_item_id = ? OR l.source_item_id = ?)
+        `)
+        .get(entityId, entityId, entityId) as Row | undefined
+      return row?.value ? String(row.value).slice(0, 10) : null
+    }
     const tableAndColumn: Record<string, [string, string]> = {
-      source: ['source_items', 'business_date'],
       event: ['events', 'event_date'],
       brief: ['daily_briefs', 'work_date']
     }
@@ -1597,6 +1840,7 @@ function mapSource(row: Row): SourceItem {
     error: nullableString(row.error),
     contentHash: String(row.content_hash),
     assetCount: Number(row.asset_count ?? 0),
+    workDates: [],
     createdAt: String(row.created_at),
     updatedAt: String(row.updated_at)
   }
@@ -1620,6 +1864,8 @@ function mapEvent(row: Row, evidence: EvidenceLink[], requirementIds: string[]):
   return {
     id: String(row.id),
     title: String(row.title),
+    workItemKey: String(row.work_item_key ?? row.entity_key),
+    workItemTitle: String(row.work_item_title ?? row.title),
     eventType: String(row.event_type),
     eventDate: nullableString(row.event_date),
     datePrecision: asDatePrecision(row.date_precision),
@@ -1737,8 +1983,15 @@ function buildDashboard(
     current[key] += 1
     activityMap.set(day, current)
   }
-  sources.forEach((source) => add(source.businessDate ?? source.createdAt, 'sources'))
-  events.forEach((event) => add(event.eventDate ?? event.createdAt, 'events'))
+  sources.forEach((source) => {
+    const workDates = source.workDates.length
+      ? source.workDates
+      : source.businessDate
+        ? [source.businessDate]
+        : []
+    workDates.forEach((workDate) => add(workDate, 'sources'))
+  })
+  events.forEach((event) => add(event.eventDate, 'events'))
 
   return {
     totals: {
@@ -1761,6 +2014,36 @@ function nextWorkday(value: string): string {
     date.setUTCDate(date.getUTCDate() + 1)
   } while (date.getUTCDay() === 0 || date.getUTCDay() === 6)
   return date.toISOString().slice(0, 10)
+}
+
+function fallbackStandupForEvents(
+  workDate: string,
+  events: AnalysisResult['events']
+): AnalysisResult['dailyBriefs'][number] {
+  const isBlocker = (value: string): boolean => /问题|风险|阻塞|block|issue/i.test(value)
+  const isPlan = (value: string): boolean => /计划|下一步|待办|plan|todo/i.test(value)
+  const blockers = events.filter((event) => isBlocker(event.eventType)).map((event) => event.summary)
+  const nextSteps = events.filter((event) => isPlan(event.eventType)).map((event) => event.summary)
+  const completed = events
+    .filter((event) => !isBlocker(event.eventType) && !isPlan(event.eventType))
+    .map((event) => event.summary)
+  const overview = events.map((event) => event.summary).join('；') || '当日工作内容已整理完成。'
+  return {
+    workDate,
+    title: `${workDate} 早会汇报`,
+    overview,
+    completed,
+    inProgress: [],
+    blockers,
+    nextSteps,
+    script: [
+      '大家早上好，下面同步一下当天的工作进展。',
+      overview,
+      blockers.length ? `当前风险或需要协助：${blockers.join('；')}。` : '目前没有明显阻塞。',
+      nextSteps.length ? `接下来计划：${nextSteps.join('；')}。` : '',
+      '以上是我的工作同步，谢谢。'
+    ].filter(Boolean).join('\n\n')
+  }
 }
 
 export interface QuestionDateRange {

@@ -22,11 +22,13 @@ const snapshot: AppSnapshot = {
       error: null,
       contentHash: 'hash',
       assetCount: 0,
+      workDates: ['2026-07-15'],
       createdAt: '2026-07-15T08:00:00.000Z',
       updatedAt: '2026-07-15T08:00:00.000Z'
     }
   ],
   events: [],
+  workItems: [],
   dailyBriefs: [
     {
       id: 'brief-1',
@@ -70,6 +72,26 @@ describe('exporters', () => {
         includeAttachments: false
       }).sources
     ).toHaveLength(0)
+  })
+
+  it('does not use the upload timestamp as a work-date export fallback', () => {
+    const undatedSource = {
+      ...snapshot.sources[0]!,
+      id: 'source-undated',
+      title: '日期待确认资料',
+      businessDate: null,
+      datePrecision: 'unknown' as const,
+      dateOrigin: 'inferred' as const,
+      workDates: [],
+      createdAt: '2026-07-15T09:00:00.000Z'
+    }
+    const filtered = filterSnapshot({ ...snapshot, sources: [undatedSource] }, {
+      format: 'markdown',
+      fromDate: '2026-07-15',
+      toDate: '2026-07-15',
+      includeAttachments: false
+    })
+    expect(filtered.sources).toEqual([])
   })
 
   it('uses an inclusive date range for every exported collection', () => {

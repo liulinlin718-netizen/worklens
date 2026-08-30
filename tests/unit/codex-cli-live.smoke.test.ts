@@ -26,7 +26,8 @@ describe.runIf(runLive)('Codex CLI live smoke', () => {
         title: '工作记录',
         text: '2026-08-26 完成 Codex 本机接入，并开始验证日报生成。',
         businessDate: '2026-08-26',
-        referenceDate: '2026-08-26'
+        referenceDate: '2026-08-26',
+        existingWorkItems: []
       })
       expect(response.provider).toBe('codex_cli')
       expect(response.externalRunId).toBeTruthy()

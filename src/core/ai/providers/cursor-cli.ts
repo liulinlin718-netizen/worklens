@@ -477,6 +477,9 @@ function firstNonEmptyString(...values: unknown[]): string | undefined {
 }
 
 export function buildPrompt(request: AnalysisRequest): string {
+  const existingWorkItems = request.existingWorkItems.length
+    ? JSON.stringify(request.existingWorkItems, null, 2)
+    : '[]'
   return `你是 WorkLens 的资料结构化引擎。请读取当前工作目录中的 source.txt，只分析该文件内容。
 
 安全要求：
@@ -487,7 +490,10 @@ export function buildPrompt(request: AnalysisRequest): string {
 
 当前日期：${request.referenceDate}
 资料标题：${request.title}
-用户手动日期：${request.businessDate ?? '未提供'}
+资料分组参考日期：${request.businessDate ?? '未提供'}
+
+已有工作事项（同类工作优先复用其中的 key；不是同一主题时新建简短稳定 key）：
+${existingWorkItems}
 
 必须严格使用以下字段名与枚举（不要改名）：
 {
@@ -500,12 +506,26 @@ export function buildPrompt(request: AnalysisRequest): string {
   "events": [
     {
       "title": "事件标题",
+      "workItemKey": "稳定的同类工作键",
+      "workItemTitle": "跨日期汇总时显示的稳定事项名",
       "eventType": "meeting",
       "eventDate": "YYYY-MM-DD",
       "datePrecision": "day",
       "summary": "事件摘要",
       "confidence": 0.8,
       "evidence": [{ "quote": "原文原句", "blockIndex": null }]
+    }
+  ],
+  "dailyBriefs": [
+    {
+      "workDate": "YYYY-MM-DD",
+      "title": "次日早会汇报",
+      "overview": "当天整体工作概括",
+      "completed": ["已完成事项"],
+      "inProgress": ["进行中事项及进度"],
+      "blockers": ["风险、阻塞或需要协助的事项"],
+      "nextSteps": ["下一工作日计划"],
+      "script": "只基于该 workDate 的自然中文逐字稿"
     }
   ],
   "summary": {
@@ -527,7 +547,13 @@ export function buildPrompt(request: AnalysisRequest): string {
 枚举约束：
 - precision/datePrecision: day|week|month|quarter|unknown
 - evidence 必须是数组；sourceDate/summary 必须是对象（不是字符串）
-把多份资料视为同一个工作日，去重合并，不要逐份复述。script 要口语化，包含问候、昨天完成、当前进展、风险/协助、今天计划和收尾；没有阻塞时明确说目前没有明显阻塞。
+- 资料可能一次包含很多天。先识别每段工作记录真正对应的工作日，再按 workDate 分类；上传时间和“资料分组参考日期”不能覆盖正文里明确的工作日。
+- 只有日志标题、日记分段日期或“当天/昨日工作”明确指向的日期才能作为 eventDate。需求截止日、计划上线日、会议预约日、数据统计区间等工作内容内部日期，不能误当成这条工作记录的时间戳。
+- 同一工作事项在同一天的重复描述合并为一个 event；跨日期的进展必须分别保留为多个 event，并使用相同 workItemKey。
+- workItemKey 应优先复用上方已有工作事项；workItemTitle 保持稳定，不要带“今天、完成、继续推进”等一次性状态词。
+- evidence.quote 只截取与该 event 直接相关的短原句或短段落，不得把整份跨日资料放入一个 event。
+- dailyBriefs 必须按识别出的每个工作日分别生成；每份 script 只能包含该日内容。若资料没有明确工作日，可返回空数组。
+把同一天的重复内容去重合并，不要逐份复述。script 要口语化，包含问候、昨天完成、当前进展、风险/协助、今天计划和收尾；没有阻塞时明确说目前没有明显阻塞。
 若无法判断日期，sourceDate 可为 null；events 可为 []。
 `
 }

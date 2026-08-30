@@ -199,10 +199,8 @@ function registerIpcHandlers(): void {
       const input = CaptureTextInputSchema.parse(rawInput)
       const source = await requireIngestion().captureText(input)
       broadcastDataChanged()
-      void scheduleAutomaticAnalysis(
-        (source.businessDate ?? source.createdAt).slice(0, 10),
-        event.sender
-      )
+      if (source.businessDate) void scheduleAutomaticAnalysis(source.businessDate, event.sender)
+      else void scheduleAutomaticSourceAnalysis(source.id, event.sender)
       return source
     })
   )
@@ -261,6 +259,43 @@ function registerIpcHandlers(): void {
       return runImport(event, (progress, signal) =>
         requireIngestion().retrySource(sourceItemId, progress, signal)
       )
+    })
+  )
+
+  ipcMain.handle(
+    IPC.deleteSource,
+    guard(async (event, rawSourceItemId): Promise<ActionResult> => {
+      const sourceItemId = z.string().uuid().parse(rawSourceItemId)
+      const deleted = requireDatabase().deleteSource(sourceItemId)
+      const remainingPaths = new Set(requireDatabase().listAssets().map((asset) => asset.localPath))
+      await Promise.all(deleted.assetPaths.filter((path) => !remainingPaths.has(path)).map((path) => rm(path, { force: true })))
+      broadcastDataChanged()
+      for (const workDate of deleted.affectedWorkDates) {
+        if (requireDatabase().listSourcesForDate(workDate).length) {
+          void scheduleAutomaticAnalysis(workDate, event.sender)
+        }
+      }
+      return { ok: true, message: `已删除“${deleted.title}”及其关联内容` }
+    })
+  )
+
+  ipcMain.handle(
+    IPC.deleteWorkEvent,
+    guard((_event, rawEventId): ActionResult => {
+      const eventId = z.string().uuid().parse(rawEventId)
+      const deleted = requireDatabase().deleteWorkEvent(eventId)
+      broadcastDataChanged()
+      return { ok: true, message: `已删除时间线内容“${deleted.title}”` }
+    })
+  )
+
+  ipcMain.handle(
+    IPC.deleteWorkItem,
+    guard((_event, rawWorkItemKey): ActionResult => {
+      const workItemKey = z.string().trim().min(1).max(500).parse(rawWorkItemKey)
+      const deleted = requireDatabase().deleteWorkItem(workItemKey)
+      broadcastDataChanged()
+      return { ok: true, message: `已删除工作事项“${deleted.title}”及 ${deleted.deletedCount} 条历史内容` }
     })
   )
 
@@ -435,11 +470,12 @@ async function runImport(
       controller.signal
     )
     broadcastDataChanged()
-    const importedDates = new Set(
-      result.imported.map((source) => (source.businessDate ?? source.createdAt).slice(0, 10))
-    )
+    const importedDates = new Set(result.imported.flatMap((source) => source.businessDate ? [source.businessDate] : []))
     for (const workDate of importedDates) {
       void scheduleAutomaticAnalysis(workDate, event.sender)
+    }
+    for (const source of result.imported.filter((item) => !item.businessDate)) {
+      void scheduleAutomaticSourceAnalysis(source.id, event.sender)
     }
     const processed = result.imported.length + result.duplicates.length + result.failed.length
     const message = result.cancelled
@@ -558,14 +594,38 @@ async function scheduleAutomaticAnalysis(
   try {
     const settings = await requireAnalysis().getProviderSettings()
     if (!settings.autoAnalyze) return
-    const existingTimer = automaticAnalysisTimers.get(workDate)
+    const timerKey = `date:${workDate}`
+    const existingTimer = automaticAnalysisTimers.get(timerKey)
     if (existingTimer) clearTimeout(existingTimer)
     automaticAnalysisTimers.set(
-      workDate,
+      timerKey,
       setTimeout(() => {
-        automaticAnalysisTimers.delete(workDate)
+        automaticAnalysisTimers.delete(timerKey)
         if (closing) return
         void enqueueDailyAnalysis(workDate, sender, true).catch(() => undefined)
+      }, 600)
+    )
+  } catch {
+    // The source remains available locally and can be retried manually.
+  }
+}
+
+async function scheduleAutomaticSourceAnalysis(
+  sourceItemId: string,
+  sender: Electron.WebContents
+): Promise<void> {
+  try {
+    const settings = await requireAnalysis().getProviderSettings()
+    if (!settings.autoAnalyze) return
+    const timerKey = `source:${sourceItemId}`
+    const existingTimer = automaticAnalysisTimers.get(timerKey)
+    if (existingTimer) clearTimeout(existingTimer)
+    automaticAnalysisTimers.set(
+      timerKey,
+      setTimeout(() => {
+        automaticAnalysisTimers.delete(timerKey)
+        if (closing) return
+        void enqueueSourceAnalysis(sourceItemId, sender).catch(() => undefined)
       }, 600)
     )
   } catch {
@@ -579,9 +639,10 @@ function enqueueDailyAnalysis(
   automatic: boolean
 ): Promise<void> {
   if (!automatic) {
-    const pendingAutomaticRun = automaticAnalysisTimers.get(workDate)
+    const timerKey = `date:${workDate}`
+    const pendingAutomaticRun = automaticAnalysisTimers.get(timerKey)
     if (pendingAutomaticRun) clearTimeout(pendingAutomaticRun)
-    automaticAnalysisTimers.delete(workDate)
+    automaticAnalysisTimers.delete(timerKey)
   }
   const task = analysisQueue.catch(() => undefined).then(async () => {
     const prefix = automatic ? '自动生成日报' : '重新生成日报'
@@ -602,6 +663,42 @@ function enqueueDailyAnalysis(
         sender,
         '',
         `${workDate} · ${prefix}失败：${error instanceof Error ? error.message : String(error)}`,
+        'analysis',
+        undefined,
+        undefined,
+        true
+      )
+      throw error
+    } finally {
+      broadcastDataChanged()
+    }
+  })
+  analysisQueue = task.catch(() => undefined)
+  return task
+}
+
+function enqueueSourceAnalysis(
+  sourceItemId: string,
+  sender: Electron.WebContents
+): Promise<void> {
+  const task = analysisQueue.catch(() => undefined).then(async () => {
+    let sourceTitle = '跨日期资料'
+    try {
+      sourceTitle = requireDatabase().getSource(sourceItemId).title
+    } catch {
+      return
+    }
+    sendJobProgress(sender, sourceItemId, `${sourceTitle} · 正在识别各条工作的实际日期`, 'analysis')
+    try {
+      await requireAnalysis().analyzeSource(sourceItemId, (message) => {
+        sendJobProgress(sender, sourceItemId, `${sourceTitle} · ${message}`, 'analysis')
+      })
+      sendJobProgress(sender, sourceItemId, `${sourceTitle} · 已按工作日期拆分并归档`, 'analysis', undefined, undefined, true)
+    } catch (error) {
+      sendJobProgress(
+        sender,
+        sourceItemId,
+        `${sourceTitle} · 自动整理失败：${error instanceof Error ? error.message : String(error)}`,
         'analysis',
         undefined,
         undefined,

@@ -53,6 +53,8 @@ describe('daily work synthesis flow', () => {
             events: [
               {
                 title: '登录页改版交付',
+                workItemKey: 'login-page-redesign',
+                workItemTitle: '登录页改版',
                 eventType: '交付',
                 eventDate: '2026-08-24',
                 datePrecision: 'day',
@@ -62,6 +64,8 @@ describe('daily work synthesis flow', () => {
               },
               {
                 title: '接口联调等待权限',
+                workItemKey: 'api-integration',
+                workItemTitle: '接口联调',
                 eventType: '问题',
                 eventDate: '2026-08-24',
                 datePrecision: 'day',
@@ -70,6 +74,7 @@ describe('daily work synthesis flow', () => {
                 evidence: [{ quote: '接口联调正在等待权限', blockIndex: 1 }]
               }
             ],
+            dailyBriefs: [],
             summary: {
               title: '8 月 24 日工作日报',
               content: '完成页面改版，接口联调等待权限。',

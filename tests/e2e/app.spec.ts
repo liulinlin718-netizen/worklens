@@ -48,6 +48,11 @@ test('keeps daily capture separate and archives a mixed-day batch by content dat
     window.on('pageerror', (error) => console.error(`[renderer:error] ${error.message}`))
     await expect(window).toHaveTitle('WorkLens')
     await expect(window.locator('.app-shell')).toBeVisible()
+    await expect(window.locator('.brand-mark img')).toBeVisible()
+    expect(await window.locator('.brand-mark img').evaluate((image) => ({
+      naturalWidth: (image as HTMLImageElement).naturalWidth,
+      naturalHeight: (image as HTMLImageElement).naturalHeight
+    }))).toEqual({ naturalWidth: 1024, naturalHeight: 1024 })
     await expect(window.locator('.quick-entry')).toHaveText(['每日记录', '批量上传'])
     await window.evaluate(() =>
       globalThis.window.worklens.saveProviderSettings({

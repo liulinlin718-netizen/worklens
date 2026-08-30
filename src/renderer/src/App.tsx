@@ -1,6 +1,7 @@
 import {
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -46,6 +47,7 @@ import {
   Sparkles,
   Terminal,
   Timeline,
+  Trash2,
   Upload,
   X,
   XCircle
@@ -78,7 +80,8 @@ import type {
   WorkQuestionAnswer,
   WorkQuestionCitation,
   WorkQuestionMessage,
-  WorkEvent
+  WorkEvent,
+  WorkItem
 } from '@shared/contracts'
 
 type NavKey = 'dashboard' | 'capture' | 'batch' | 'briefs' | 'ask' | 'timeline' | 'events' | 'export' | 'settings'
@@ -98,6 +101,10 @@ interface PendingTextItem {
   title: string
 }
 
+type PendingWorkContentDeletion =
+  | { kind: 'event'; event: WorkEvent }
+  | { kind: 'workItem'; item: WorkItem }
+
 const BATCH_FILE_EXTENSIONS = new Set([
   'txt', 'md', 'markdown', 'pdf', 'docx', 'png', 'jpg', 'jpeg', 'webp', 'tiff'
 ])
@@ -110,6 +117,7 @@ const DAILY_BRIEF_IMAGE_TYPES = new Set(['image/png', 'image/jpeg', 'image/webp'
 const EMPTY_SNAPSHOT: AppSnapshot = {
   sources: [],
   events: [],
+  workItems: [],
   dailyBriefs: [],
   dashboard: {
     totals: { sources: 0, events: 0, dailyBriefs: 0, processing: 0 },
@@ -144,6 +152,8 @@ export function App(): ReactNode {
   const [activeBriefDate, setActiveBriefDate] = useState(todayLocal())
   const [eventsInitialSection, setEventsInitialSection] = useState<'events' | 'library'>('events')
   const [workChat, setWorkChat] = useState<WorkChatEntry[]>([])
+  const [pendingWorkContentDeletion, setPendingWorkContentDeletion] = useState<PendingWorkContentDeletion | null>(null)
+  const [deletingWorkContent, setDeletingWorkContent] = useState(false)
   const searchRef = useRef<HTMLInputElement>(null)
 
   const loadSnapshot = useCallback(async () => {
@@ -246,13 +256,39 @@ export function App(): ReactNode {
   }
   const notify = (message: string): void => setToast({ message, tone: 'success' })
   const fail = (error: unknown): void => showError(setToast, error)
+  const deleteSource = async (source: SourceItem): Promise<void> => {
+    try {
+      const result = await window.worklens.deleteSource(source.id)
+      setSelectedSource(null)
+      await loadSnapshot()
+      notify(result.message)
+    } catch (error) {
+      fail(error)
+    }
+  }
+  const deleteWorkContent = async (): Promise<void> => {
+    if (!pendingWorkContentDeletion) return
+    setDeletingWorkContent(true)
+    try {
+      const result = pendingWorkContentDeletion.kind === 'event'
+        ? await window.worklens.deleteWorkEvent(pendingWorkContentDeletion.event.id)
+        : await window.worklens.deleteWorkItem(pendingWorkContentDeletion.item.key)
+      setPendingWorkContentDeletion(null)
+      await loadSnapshot()
+      notify(result.message)
+    } catch (error) {
+      fail(error)
+    } finally {
+      setDeletingWorkContent(false)
+    }
+  }
 
   return (
     <div className="app-shell">
       <aside className="sidebar">
         <div className="window-drag-region" />
         <div className="brand">
-          <div className="brand-mark"><Sparkles size={17} strokeWidth={2.4} /></div>
+          <div className="brand-mark"><img src="./worklens-mark.svg" alt="" aria-hidden="true" /></div>
           <div><strong>WorkLens</strong><span>每天工作，清晰汇报</span></div>
         </div>
         <div className="quick-entry-grid">
@@ -326,8 +362,8 @@ export function App(): ReactNode {
               {activeNav === 'ask' && (
                 <AskWorkPage snapshot={snapshot} entries={workChat} setEntries={setWorkChat} onOpenCitation={openWorkCitation} fail={fail} />
               )}
-              {activeNav === 'timeline' && <TimelinePage snapshot={snapshot} onSelect={setSelectedSource} />}
-              {activeNav === 'events' && <EventsPage key={eventsInitialSection} events={snapshot.events} sources={snapshot.sources} initialSection={eventsInitialSection} onSelectSource={setSelectedSource} />}
+              {activeNav === 'timeline' && <TimelinePage snapshot={snapshot} onSelect={setSelectedSource} onRequestDelete={(event) => setPendingWorkContentDeletion({ kind: 'event', event })} />}
+              {activeNav === 'events' && <EventsPage key={eventsInitialSection} workItems={snapshot.workItems} events={snapshot.events} sources={snapshot.sources} initialSection={eventsInitialSection} onSelectSource={setSelectedSource} onRequestDelete={(item) => setPendingWorkContentDeletion({ kind: 'workItem', item })} />}
               {activeNav === 'export' && <ExportPage snapshot={snapshot} notify={notify} fail={fail} />}
               {activeNav === 'settings' && <SettingsPage notify={notify} fail={fail} />}
             </>
@@ -335,22 +371,46 @@ export function App(): ReactNode {
         </main>
       </section>
 
-      {selectedSource && <SourceDrawer source={selectedSource} onClose={() => setSelectedSource(null)} />}
+      {selectedSource && <SourceDrawer source={selectedSource} onClose={() => setSelectedSource(null)} onDelete={deleteSource} />}
+      {pendingWorkContentDeletion && <DeleteWorkContentDialog deletion={pendingWorkContentDeletion} busy={deletingWorkContent} onCancel={() => setPendingWorkContentDeletion(null)} onConfirm={() => void deleteWorkContent()} />}
       {toast && <Toast message={toast.message} tone={toast.tone} />}
     </div>
   )
 }
 
+function DeleteWorkContentDialog({ deletion, busy, onCancel, onConfirm }: { deletion: PendingWorkContentDeletion; busy: boolean; onCancel: () => void; onConfirm: () => void }): ReactNode {
+  const cancelRef = useRef<HTMLButtonElement>(null)
+  const isEvent = deletion.kind === 'event'
+  const title = isEvent ? deletion.event.title : deletion.item.title
+  useEffect(() => {
+    cancelRef.current?.focus()
+    const handleKeyDown = (event: KeyboardEvent): void => {
+      if (event.key === 'Escape' && !busy) onCancel()
+    }
+    window.addEventListener('keydown', handleKeyDown)
+    return () => window.removeEventListener('keydown', handleKeyDown)
+  }, [busy, onCancel])
+  return <div className="delete-confirm-layer" onMouseDown={(event) => { if (event.target === event.currentTarget && !busy) onCancel() }}>
+    <section className="delete-confirm-dialog" role="alertdialog" aria-modal="true" aria-labelledby="delete-work-content-title" aria-describedby="delete-work-content-description">
+      <div className="delete-confirm-icon"><Trash2 size={20} /></div>
+      <h3 id="delete-work-content-title">{isEvent ? '删除这条时间线内容？' : '删除这个工作事项？'}</h3>
+      <p id="delete-work-content-description">{isEvent ? '只会删除这条整理后的工作内容及其关联证据；原始资料和日报不会被删除。' : `将删除该事项下的 ${deletion.item.eventCount} 条历史工作内容及其关联证据；原始资料和日报不会被删除。`}</p>
+      <strong>{title}</strong>
+      <div><button ref={cancelRef} className="secondary-button" disabled={busy} onClick={onCancel}>取消</button><button className="danger-button" disabled={busy} onClick={onConfirm}>{busy ? <LoaderCircle className="spin" size={14} /> : <Trash2 size={14} />}{busy ? '正在删除' : '确认删除'}</button></div>
+    </section>
+  </div>
+}
+
 function Dashboard({ snapshot, navigate, openBrief, onSelectSource }: { snapshot: AppSnapshot; navigate: (key: NavKey) => void; openBrief: (date: string) => void; onSelectSource: (source: SourceItem) => void }): ReactNode {
   const { dashboard } = snapshot
-  const todaySources = snapshot.sources.filter((source) => sourceDate(source) === todayLocal())
+  const todaySources = snapshot.sources.filter((source) => sourceHasWorkDate(source, todayLocal()))
   const recentSources = [...snapshot.sources]
     .sort((left, right) => right.createdAt.localeCompare(left.createdAt))
     .slice(0, 4)
   const cards = [
     { label: '今日记录', value: todaySources.length, note: '文字与文件统一合并', icon: FileText, tone: 'violet', destination: 'capture' as NavKey },
     { label: '已生成日报', value: dashboard.totals.dailyBriefs, note: '每个工作日保留一版', icon: Clipboard, tone: 'green', destination: 'briefs' as NavKey },
-    { label: '工作事项', value: dashboard.totals.events, note: '来自合并后的日报', icon: BriefcaseBusiness, tone: 'amber', destination: 'events' as NavKey }
+    { label: '工作事项', value: snapshot.workItems.length, note: '同类进展跨日期合并', icon: BriefcaseBusiness, tone: 'amber', destination: 'events' as NavKey }
   ]
 
   return (
@@ -400,7 +460,7 @@ function Dashboard({ snapshot, navigate, openBrief, onSelectSource }: { snapshot
             {recentSources.map((source) => (
               <button className="recent-source-row" key={source.id} onClick={() => onSelectSource(source)}>
                 <div className={`file-kind ${source.kind}`}><FileText size={15} /></div>
-                <div><strong>{source.title}</strong><span>{sourceDate(source)} · {source.kind.toUpperCase()}</span></div>
+                <div><strong>{source.title}</strong><span>上传于 {formatTimestamp(source.createdAt)} · {source.kind.toUpperCase()}</span></div>
                 <StatusPill status={source.status} />
                 <ChevronRight size={14} />
               </button>
@@ -418,7 +478,7 @@ function CapturePage({ sources, onSelect, onChanged, openBrief, notify, fail }: 
   const [text, setText] = useState('')
   const [date, setDate] = useState(todayLocal())
   const [busy, setBusy] = useState(false)
-  const visibleSources = sources.filter((source) => sourceDate(source) === date)
+  const visibleSources = sources.filter((source) => sourceHasWorkDate(source, date))
 
   const submit = async (event: FormEvent): Promise<void> => {
     event.preventDefault()
@@ -518,13 +578,21 @@ function BatchUploadPage({ snapshot, progress, onSelect, onChanged, openTimeline
   const phaseIndex = phase === 'compose' ? 0 : phase === 'processing' ? 1 : 2
   const groups = useMemo(() => {
     const grouped = new Map<string, SourceItem[]>()
-    for (const source of result?.imported ?? []) {
-      const date = sourceDate(source)
-      grouped.set(date, [...(grouped.get(date) ?? []), source])
+    for (const imported of result?.imported ?? []) {
+      const source = snapshot.sources.find((item) => item.id === imported.id) ?? imported
+      const dates = source.workDates.length ? source.workDates : source.businessDate ? [source.businessDate] : ['pending']
+      for (const date of dates) grouped.set(date, [...(grouped.get(date) ?? []), source])
     }
-    return Array.from(grouped, ([date, sources]) => ({ date, sources })).sort((a, b) => b.date.localeCompare(a.date))
-  }, [result])
-  const fallbackCount = result?.imported.filter((source) => !source.businessDate).length ?? 0
+    return Array.from(grouped, ([date, sources]) => ({ date, sources })).sort((a, b) => {
+      if (a.date === 'pending') return 1
+      if (b.date === 'pending') return -1
+      return b.date.localeCompare(a.date)
+    })
+  }, [result, snapshot.sources])
+  const fallbackCount = result?.imported.filter((source) => {
+    const current = snapshot.sources.find((item) => item.id === source.id) ?? source
+    return !current.workDates.length && !current.businessDate
+  }).length ?? 0
 
   const addFiles = (files: File[]): void => {
     if (!files.length || phase !== 'compose' || busy) return
@@ -698,7 +766,7 @@ function BatchUploadPage({ snapshot, progress, onSelect, onChanged, openTimeline
   }
 
   const updateDate = async (source: SourceItem, businessDate: string): Promise<void> => {
-    if (!businessDate || businessDate === sourceDate(source)) return
+    if (!businessDate || sourceWorkDates(source).includes(businessDate)) return
     setEditingDateId(source.id)
     try {
       const updated = await window.worklens.updateSourceDate({ sourceItemId: source.id, businessDate })
@@ -802,16 +870,16 @@ function BatchUploadPage({ snapshot, progress, onSelect, onChanged, openTimeline
 
           <section className="batch-results panel">
             <div className="panel-header"><div><h2>本次归档结果</h2><p>日期可以直接修改；修改后对应工作日会自动重新整理</p></div><div className="batch-result-actions"><button className="secondary-button" disabled={busy} onClick={resetForNextBatch}>{result.cancelled ? '返回待处理列表' : '再导入一批'}</button><button className="primary-button" onClick={openTimeline}><Timeline size={15} />完成并查看时间线</button></div></div>
-            {fallbackCount > 0 && <div className="batch-review-warning"><CircleAlert size={15} /><span>{fallbackCount} 项没有识别到明确日期，暂按导入日归档；请检查黄色日期项。</span></div>}
+            {fallbackCount > 0 && <div className="batch-review-warning"><CircleAlert size={15} /><span>{fallbackCount} 项没有识别到明确工作日期：不会按上传日写入时间线，可在原始资料中核对后再补充日期。</span></div>}
             <div className="batch-date-groups">
               {groups.map((group) => (
                 <section className="batch-date-group" key={group.date}>
-                  <div className="batch-date-heading"><div className="batch-date-icon"><CalendarDays size={15} /></div><div><strong>{group.date}</strong><span>{friendlyDate(group.date)} · {group.sources.length} 份资料</span></div><small>已归入时间线</small></div>
+                  <div className="batch-date-heading"><div className="batch-date-icon"><CalendarDays size={15} /></div><div><strong>{group.date === 'pending' ? '工作日期待确认' : group.date}</strong><span>{group.date === 'pending' ? '未使用上传日期代替' : `${friendlyDate(group.date)} · ${group.sources.length} 份资料`}</span></div><small className={group.date === 'pending' ? 'pending' : ''}>{group.date === 'pending' ? '未进入时间线' : '已归入时间线'}</small></div>
                   <div className="batch-source-list">
                     {group.sources.map((source) => (
                       <div className="batch-source-row" key={source.id}>
                         <button className="batch-source-open" onClick={() => onSelect(source)}><div className={`file-kind ${source.kind}`}><FileText size={15} /></div><div><strong>{source.title}</strong><span>{source.excerpt || '未提取到文字'}</span></div><ChevronRight size={15} /></button>
-                        <div className="batch-date-editor"><span className={`date-origin-badge ${source.businessDate ? '' : 'fallback'} ${source.dateOrigin === 'manual' ? 'manual' : ''}`}>{source.dateOrigin === 'manual' ? '手动修正' : source.businessDate ? '正文识别' : '按导入日'}</span><label><span>归档日期</span><input type="date" aria-label={`${source.title}归档日期`} value={sourceDate(source)} disabled={editingDateId === source.id} onChange={(event) => void updateDate(source, event.target.value)} /></label>{editingDateId === source.id && <LoaderCircle className="spin" size={14} />}</div>
+                        <div className="batch-date-editor"><span className={`date-origin-badge ${source.workDates.length || source.businessDate ? '' : 'fallback'} ${source.dateOrigin === 'manual' ? 'manual' : ''}`}>{source.dateOrigin === 'manual' ? '手动修正' : source.workDates.length > 1 ? `识别 ${source.workDates.length} 个工作日` : source.workDates.length === 1 || source.businessDate ? '正文识别' : '日期待确认'}</span>{source.workDates.length <= 1 && <label><span>整份资料工作日</span><input type="date" aria-label={`${source.title}整份资料工作日`} value={source.businessDate ?? source.workDates[0] ?? ''} disabled={editingDateId === source.id} onChange={(event) => void updateDate(source, event.target.value)} /></label>}{source.workDates.length > 1 && <span className="batch-multi-date-note">多日内容已逐条归类</span>}{editingDateId === source.id && <LoaderCircle className="spin" size={14} />}</div>
                       </div>
                     ))}
                   </div>
@@ -820,7 +888,7 @@ function BatchUploadPage({ snapshot, progress, onSelect, onChanged, openTimeline
               {!result.imported.length && <EmptyState icon={<Upload size={27} />} title="这次没有新增资料" text="重复文件已安全跳过；失败文件可以在下方直接重试。" />}
             </div>
 
-            {result.duplicates.length > 0 && <div className="batch-duplicates"><div><CheckCircle2 size={15} /><strong>{result.duplicates.length} 份重复资料已跳过</strong><span>数据库中的原记录保持不变</span></div>{result.duplicates.map((item, index) => <button key={`${item.source.id}:${item.fileName}:${index}`} onClick={() => onSelect(item.source)}><div><strong>{item.fileName}</strong><span>已存在于 {sourceDate(item.source)} · {item.source.title}</span></div><ChevronRight size={14} /></button>)}</div>}
+            {result.duplicates.length > 0 && <div className="batch-duplicates"><div><CheckCircle2 size={15} /><strong>{result.duplicates.length} 份重复资料已跳过</strong><span>数据库中的原记录保持不变</span></div>{result.duplicates.map((item, index) => <button key={`${item.source.id}:${item.fileName}:${index}`} onClick={() => onSelect(item.source)}><div><strong>{item.fileName}</strong><span>{item.source.workDates.length ? `涉及工作日 ${formatWorkDateRange(item.source.workDates)}` : '工作日期待确认'} · {item.source.title}</span></div><ChevronRight size={14} /></button>)}</div>}
 
             {result.failed.length > 0 && <div className="batch-failures"><div><CircleAlert size={15} /><strong>{result.failed.length} 份文件需要处理</strong></div>{result.failed.map((item, index) => <div className="batch-failure-row" key={`${item.sourceItemId ?? item.fileName}:${index}`}><div><strong>{item.fileName}</strong><span>{item.error}</span></div>{item.sourceItemId ? <button className="secondary-button" disabled={busy} onClick={() => void retryFailure(item.sourceItemId!)}>{retryingId === item.sourceItemId ? <LoaderCircle className="spin" size={13} /> : <RefreshCw size={13} />}重新解析</button> : <small>请确认格式和文件大小后重新选择</small>}</div>)}</div>}
           </section>
@@ -856,8 +924,8 @@ function BriefsPage({ briefs, sources, selectedDate, setSelectedDate, onChanged,
   const [dateMenuOpen, setDateMenuOpen] = useState(false)
   const dateMenuRef = useRef<HTMLDivElement>(null)
   const brief = briefs.find((item) => item.workDate === selectedDate) ?? null
-  const sourceCount = sources.filter((source) => sourceDate(source) === selectedDate).length
-  const availableDates = Array.from(new Set([...briefs.map((item) => item.workDate), ...sources.map(sourceDate)])).sort((a, b) => b.localeCompare(a))
+  const sourceCount = sources.filter((source) => sourceHasWorkDate(source, selectedDate)).length
+  const availableDates = Array.from(new Set([...briefs.map((item) => item.workDate), ...sources.flatMap(sourceWorkDates)])).sort((a, b) => b.localeCompare(a))
 
   useEffect(() => {
     setDraftScript(brief?.script ?? '')
@@ -966,7 +1034,7 @@ function BriefsPage({ briefs, sources, selectedDate, setSelectedDate, onChanged,
 
       <section className="brief-main">
         <div className="brief-toolbar">
-          <div className={`brief-date-menu ${dateMenuOpen ? 'open' : ''}`} ref={dateMenuRef}><button className="brief-date-trigger" aria-label="选择工作日期" aria-haspopup="listbox" aria-expanded={dateMenuOpen} onClick={() => setDateMenuOpen((open) => !open)}><CalendarDays size={15} /><span><strong>{friendlyDate(selectedDate)}</strong><small>{selectedDate}</small></span><ChevronDown size={14} /></button>{dateMenuOpen && <div className="brief-date-popover" role="listbox" aria-label="工作日期">{(availableDates.length ? availableDates : [selectedDate]).map((date) => { const selected = date === selectedDate; const count = sources.filter((source) => sourceDate(source) === date).length; return <button key={date} className={selected ? 'selected' : ''} role="option" aria-selected={selected} onClick={() => { setSelectedDate(date); setDateMenuOpen(false) }}><span><strong>{friendlyDate(date)}</strong><small>{date} · {count} 份资料</small></span>{selected && <Check size={14} />}</button> })}</div>}</div>
+          <div className={`brief-date-menu ${dateMenuOpen ? 'open' : ''}`} ref={dateMenuRef}><button className="brief-date-trigger" aria-label="选择工作日期" aria-haspopup="listbox" aria-expanded={dateMenuOpen} onClick={() => setDateMenuOpen((open) => !open)}><CalendarDays size={15} /><span><strong>{friendlyDate(selectedDate)}</strong><small>{selectedDate}</small></span><ChevronDown size={14} /></button>{dateMenuOpen && <div className="brief-date-popover" role="listbox" aria-label="工作日期">{(availableDates.length ? availableDates : [selectedDate]).map((date) => { const selected = date === selectedDate; const count = sources.filter((source) => sourceHasWorkDate(source, date)).length; return <button key={date} className={selected ? 'selected' : ''} role="option" aria-selected={selected} onClick={() => { setSelectedDate(date); setDateMenuOpen(false) }}><span><strong>{friendlyDate(date)}</strong><small>{date} · {count} 份资料</small></span>{selected && <Check size={14} />}</button> })}</div>}</div>
           <span>{sourceCount} 份原始资料</span>
           <button className="secondary-button" disabled={busy || saving || !sourceCount} onClick={() => void generate()}>{busy ? <LoaderCircle size={15} className="spin" /> : <RefreshCw size={15} />}{brief ? '重新生成' : '生成早会稿'}</button>
           {brief && <button className="secondary-button" disabled={saving || !draftScript.trim() || (draftScript.trim() === brief.script.trim() && !imagesChanged)} onClick={() => void saveBrief()}>{saving ? <LoaderCircle size={15} className="spin" /> : <Save size={15} />}{saving ? '正在保存' : '保存修改'}</button>}
@@ -1090,7 +1158,7 @@ function AskWorkPage({ snapshot, entries, setEntries, onOpenCitation, fail }: { 
       </section>
 
       <aside className="knowledge-aside">
-        <section className="panel knowledge-scope"><div className="eyebrow"><Database size={13} />本地知识范围</div><h3>{snapshot.sources.length} 份原始资料</h3><p>同时检索 {snapshot.dailyBriefs.length} 份日报和 {snapshot.events.length} 个合并事项。</p><ul><li><Check size={13} />支持“上周、上个月、最近 30 天”</li><li><Check size={13} />按项目名和正文关键词匹配</li><li><Check size={13} />引用可以打开原始资料</li></ul></section>
+        <section className="panel knowledge-scope"><div className="eyebrow"><Database size={13} />本地知识范围</div><h3>{snapshot.sources.length} 份原始资料</h3><p>同时检索 {snapshot.dailyBriefs.length} 份日报、{snapshot.events.length} 条历史进展和 {snapshot.workItems.length} 个聚合事项。</p><ul><li><Check size={13} />支持“上周、上个月、最近 30 天”</li><li><Check size={13} />按项目名和正文关键词匹配</li><li><Check size={13} />引用可以打开原始资料</li></ul></section>
         <section className="knowledge-tip"><Sparkles size={17} /><div><strong>提问小技巧</strong><p>带上日期范围和项目名，会得到更准确、引用更集中的答案。</p></div></section>
         {latestAnswer && <section className="knowledge-last"><span>最近一次检索</span><strong>{latestAnswer.retrievedCount} 条资料</strong><small>{latestAnswer.model}</small></section>}
       </aside>
@@ -1098,54 +1166,190 @@ function AskWorkPage({ snapshot, entries, setEntries, onOpenCitation, fail }: { 
   )
 }
 
-function TimelinePage({ snapshot, onSelect }: { snapshot: AppSnapshot; onSelect: (source: SourceItem) => void }): ReactNode {
+function TimelinePage({ snapshot, onSelect, onRequestDelete }: { snapshot: AppSnapshot; onSelect: (source: SourceItem) => void; onRequestDelete: (event: WorkEvent) => void }): ReactNode {
   const [expandedItem, setExpandedItem] = useState<string | null>(null)
+  const [activeDate, setActiveDate] = useState<string | null>(null)
+  const [historyPreview, setHistoryPreview] = useState<{
+    date: string
+    count: number
+    events: Array<Pick<WorkEvent, 'title' | 'summary' | 'eventType'>>
+    remaining: number
+    top: number
+    left: number
+    width: number
+  } | null>(null)
+  const [historyRailBox, setHistoryRailBox] = useState<{ top: number; left: number; height: number } | null>(null)
+  const groupRefs = useRef<Record<string, HTMLElement | null>>({})
+  const timelinePageRef = useRef<HTMLDivElement | null>(null)
+  const historyMarkersRef = useRef<HTMLElement | null>(null)
+  const lastTimelineWheelAt = useRef(0)
+  const pendingTimelineDateRef = useRef<{ date: string; until: number } | null>(null)
   const groups = useMemo(() => {
     const map = new Map<string, WorkEvent[]>()
     for (const event of snapshot.events) {
-      const date = (event.eventDate ?? event.createdAt).slice(0, 10)
+      if (!event.eventDate) continue
+      const date = event.eventDate.slice(0, 10)
       map.set(date, [...(map.get(date) ?? []), event])
     }
-    return Array.from(map, ([date, events]) => ({ date, events })).sort((a, b) => b.date.localeCompare(a.date))
+    return Array.from(map, ([date, events]) => ({ date, events })).sort((a, b) => a.date.localeCompare(b.date))
   }, [snapshot.events])
 
+  useEffect(() => {
+    if (!groups.length) return
+    setActiveDate((current) => current && groups.some((group) => group.date === current) ? current : groups[0]!.date)
+  }, [groups])
+
+  useLayoutEffect(() => {
+    const page = timelinePageRef.current
+    const content = page?.closest<HTMLElement>('main.content')
+    if (!page || !content) return
+    const updateRailBox = (): void => {
+      const pageBox = page.getBoundingClientRect()
+      const contentBox = content.getBoundingClientRect()
+      const next = { top: contentBox.top, left: pageBox.left - 12, height: contentBox.height }
+      setHistoryRailBox((current) => current
+        && Math.abs(current.top - next.top) < 0.5
+        && Math.abs(current.left - next.left) < 0.5
+        && Math.abs(current.height - next.height) < 0.5
+        ? current
+        : next)
+    }
+    updateRailBox()
+    const observer = new ResizeObserver(updateRailBox)
+    observer.observe(content)
+    observer.observe(page)
+    window.addEventListener('resize', updateRailBox)
+    return () => {
+      observer.disconnect()
+      window.removeEventListener('resize', updateRailBox)
+    }
+  }, [groups.length])
+
+  useEffect(() => {
+    if (!groups.length) return
+    const observer = new IntersectionObserver((entries) => {
+      const visible = entries
+        .filter((entry) => entry.isIntersecting)
+        .sort((left, right) => left.boundingClientRect.top - right.boundingClientRect.top)
+      const pending = pendingTimelineDateRef.current
+      if (pending) {
+        if (performance.now() >= pending.until) {
+          pendingTimelineDateRef.current = null
+        } else if (visible.some((entry) => (entry.target as HTMLElement).dataset.timelineDate === pending.date)) {
+          pendingTimelineDateRef.current = null
+          setActiveDate(pending.date)
+          return
+        } else {
+          return
+        }
+      }
+      const date = (visible[0]?.target as HTMLElement | undefined)?.dataset.timelineDate
+      if (date) setActiveDate(date)
+    }, { rootMargin: '-112px 0px -55% 0px', threshold: [0, 0.05, 0.2] })
+    groups.forEach((group) => {
+      const element = groupRefs.current[group.date]
+      if (element) observer.observe(element)
+    })
+    return () => observer.disconnect()
+  }, [groups])
+
+  const jumpToDate = useCallback((date: string): void => {
+    setActiveDate(date)
+    setHistoryPreview(null)
+    const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches
+    pendingTimelineDateRef.current = reducedMotion ? null : { date, until: performance.now() + 800 }
+    groupRefs.current[date]?.scrollIntoView({ behavior: reducedMotion ? 'auto' : 'smooth', block: 'start' })
+  }, [])
+  const showHistoryPreview = (target: HTMLButtonElement, group: { date: string; events: WorkEvent[] }): void => {
+    const bounds = target.getBoundingClientRect()
+    const left = bounds.right + 16
+    setHistoryPreview({
+      date: group.date,
+      count: group.events.length,
+      events: group.events.slice(0, 2).map((event) => ({ title: event.title, summary: event.summary, eventType: event.eventType })),
+      remaining: Math.max(0, group.events.length - 2),
+      top: (window.innerHeight + 92) / 2,
+      left,
+      width: Math.min(420, Math.max(260, window.innerWidth - left - 24))
+    })
+  }
+  const handleTimelineWheel = useCallback((event: WheelEvent): void => {
+    const delta = Math.abs(event.deltaY) >= Math.abs(event.deltaX) ? event.deltaY : event.deltaX
+    if (Math.abs(delta) < 2) return
+    const now = performance.now()
+    if (now - lastTimelineWheelAt.current < 280) {
+      event.preventDefault()
+      return
+    }
+    const currentIndex = Math.max(0, groups.findIndex((group) => group.date === activeDate))
+    const nextIndex = Math.min(groups.length - 1, Math.max(0, currentIndex + (delta > 0 ? 1 : -1)))
+    if (nextIndex === currentIndex) return
+    event.preventDefault()
+    lastTimelineWheelAt.current = now
+    jumpToDate(groups[nextIndex]!.date)
+  }, [activeDate, groups, jumpToDate])
+
+  useEffect(() => {
+    const markers = historyMarkersRef.current
+    if (!markers) return
+    markers.addEventListener('wheel', handleTimelineWheel, { passive: false })
+    return () => markers.removeEventListener('wheel', handleTimelineWheel)
+  }, [handleTimelineWheel])
+
   if (!groups.length) return <EmptyState large icon={<Clock3 size={34} />} title="时间线等待第一条工作内容" text="日报生成并沉淀工作事项后，会按工作日显示在这里。" />
+  const activeIndex = Math.max(0, groups.findIndex((group) => group.date === activeDate))
   return (
-    <div className="timeline-page">
-      <div className="timeline-rail" />
-      {groups.map((group) => (
-        <section className="timeline-group" key={group.date}>
-          <div className="timeline-date"><strong>{group.date.slice(8)}</strong><span>{monthLabel(group.date)}</span></div>
-          <div className="timeline-node" />
-          <div className="timeline-content">
+    <div ref={timelinePageRef} className="timeline-page">
+      <aside className={`timeline-history-index ${historyRailBox ? 'measured' : ''}`} aria-label="工作日期历史索引" style={historyRailBox ?? undefined}>
+        <nav ref={historyMarkersRef} className="timeline-history-markers" aria-label="工作日期从早到晚排列，可点击或使用鼠标滚轮切换">
+          {groups.map((group, index) => {
+            const active = activeDate === group.date
+            const distance = Math.abs(index - activeIndex)
+            const tickWidth = active ? 22 : distance === 1 ? 16 : distance === 2 ? 12 : distance === 3 ? 9 : 7
+            const spokenTitles = group.events.slice(0, 2).map((event) => event.title).join('、')
+            const remaining = Math.max(0, group.events.length - 2)
+            const label = `${friendlyDate(group.date)}，${group.events.length} 项工作内容：${spokenTitles}${remaining ? `，另有 ${remaining} 项` : ''}`
+            return <button key={group.date} className={active ? 'active' : ''} aria-label={label} aria-current={active ? 'date' : undefined} aria-describedby={historyPreview?.date === group.date ? 'timeline-history-preview' : undefined} onMouseDown={(event) => event.preventDefault()} onMouseEnter={(event) => showHistoryPreview(event.currentTarget, group)} onMouseLeave={() => setHistoryPreview(null)} onFocus={(event) => showHistoryPreview(event.currentTarget, group)} onBlur={() => setHistoryPreview(null)} onClick={() => jumpToDate(group.date)}><span className="timeline-history-line" style={{ width: tickWidth }} /></button>
+          })}
+        </nav>
+      </aside>
+      {historyPreview && <section id="timeline-history-preview" className="timeline-history-tooltip" role="tooltip" style={{ top: historyPreview.top, left: historyPreview.left, width: historyPreview.width }}><header><div><strong>{friendlyDate(historyPreview.date)}</strong><small>{historyPreview.count} 项工作内容</small></div><span>点击刻度跳转</span></header><div className="timeline-history-preview-list">{historyPreview.events.map((event, index) => <article key={`${event.title}:${index}`}><span>{event.eventType}</span><div><strong>{event.title}</strong><p>{event.summary}</p></div></article>)}</div>{historyPreview.remaining > 0 && <footer>还有 {historyPreview.remaining} 项工作内容</footer>}</section>}
+      <div className="timeline-work-stream">
+        {groups.map((group) => (
+          <section className="timeline-group" data-timeline-date={group.date} key={group.date} ref={(element) => { groupRefs.current[group.date] = element }}>
             <div className="timeline-group-header"><h2>{friendlyDate(group.date)}</h2><span>{group.events.length} 项工作内容</span></div>
             {group.events.map((event) => {
               const key = `event:${event.id}`
               const expanded = expandedItem === key
-              const source = snapshot.sources.find((item) => item.id === event.sourceItemId) ?? null
-              const originalText = source?.rawText || event.evidence[0]?.quote || '暂无可显示的原文内容'
+              const evidenceItems = event.evidence.map((evidence) => ({
+                evidence,
+                source: snapshot.sources.find((item) => item.id === evidence.sourceItemId) ?? null
+              }))
               return <article className={`timeline-card timeline-expand-card event-card ${expanded ? 'expanded' : ''}`} key={event.id}>
-                <button className="timeline-card-trigger" aria-expanded={expanded} onClick={() => setExpandedItem(expanded ? null : key)}><div className="timeline-card-icon"><BriefcaseBusiness size={17} /></div><div><div className="card-meta"><span>{event.eventType}</span><span>AI {Math.round(event.confidence * 100)}%</span></div><h3>{event.title}</h3><p>{event.summary}</p></div><ChevronDown size={18} /></button>
-                {expanded && <div className="timeline-card-detail event-detail"><div className="timeline-detail-heading"><strong>事项详情</strong><span>{event.eventDate ?? '日期未定'} · {event.evidence.length} 条来源证据</span></div><p>{event.summary}</p><div className="timeline-original-content"><strong>原文内容：</strong><p>{originalText}</p>{source && <button className="text-button" onClick={() => onSelect(source)}>打开完整原始资料 <ArrowRight size={13} /></button>}</div></div>}
+                <div className="timeline-card-header">
+                  <button className="timeline-card-trigger" aria-expanded={expanded} onClick={() => setExpandedItem(expanded ? null : key)}><div className="timeline-card-icon"><BriefcaseBusiness size={17} /></div><div><div className="card-meta"><span>{event.eventType}</span><span>AI {Math.round(event.confidence * 100)}%</span></div><h3>{event.title}</h3><p>{event.summary}</p></div><ChevronDown size={18} /></button>
+                  <button className="card-delete-button timeline-card-delete" aria-label={`删除时间线内容：${event.title}`} title="删除这条时间线内容" onClick={() => onRequestDelete(event)}><Trash2 size={15} /></button>
+                </div>
+                {expanded && <div className="timeline-card-detail event-detail"><div className="timeline-detail-heading"><strong>事项详情</strong><span>{event.eventDate ?? '日期未定'} · {event.evidence.length} 条相关证据</span></div><p>{event.summary}</p><div className="timeline-original-content"><strong>相关原文：</strong><div className="timeline-evidence-list">{evidenceItems.length ? evidenceItems.map(({ evidence, source }) => <article key={evidence.id}><q>{evidence.quote}</q><div><span>{source?.title ?? '原始资料'}</span>{source && <button className="text-button" onClick={() => onSelect(source)}>打开完整原始资料 <ArrowRight size={13} /></button>}</div></article>) : <p>暂无可显示的相关原文片段</p>}</div></div></div>}
               </article>
             })}
-          </div>
-        </section>
-      ))}
+          </section>
+        ))}
+      </div>
     </div>
   )
 }
 
-function EventsPage({ events, sources, initialSection = 'events', onSelectSource }: { events: WorkEvent[]; sources: SourceItem[]; initialSection?: 'events' | 'library'; onSelectSource: (source: SourceItem) => void }): ReactNode {
+function EventsPage({ workItems, events, sources, initialSection = 'events', onSelectSource, onRequestDelete }: { workItems: WorkItem[]; events: WorkEvent[]; sources: SourceItem[]; initialSection?: 'events' | 'library'; onSelectSource: (source: SourceItem) => void; onRequestDelete: (item: WorkItem) => void }): ReactNode {
   const [typeFilter, setTypeFilter] = useState('all')
   const [filterOpen, setFilterOpen] = useState(false)
   const [section, setSection] = useState<'events' | 'library'>(initialSection)
   const [expandedEvidence, setExpandedEvidence] = useState<string | null>(null)
   const filterMenuRef = useRef<HTMLDivElement>(null)
-  const types = Array.from(new Set(events.map((event) => event.eventType)))
+  const types = Array.from(new Set(workItems.map((item) => item.eventType)))
   const filterOptions = [{ value: 'all', label: '全部类型' }, ...types.map((type) => ({ value: type, label: type }))]
-  const visible = typeFilter === 'all' ? events : events.filter((event) => event.eventType === typeFilter)
-  const sourceLibrary = [...sources].sort((a, b) => sourceDate(b).localeCompare(sourceDate(a)) || b.createdAt.localeCompare(a.createdAt))
+  const visible = typeFilter === 'all' ? workItems : workItems.filter((item) => item.eventType === typeFilter)
+  const sourceLibrary = [...sources].sort((a, b) => b.createdAt.localeCompare(a.createdAt))
   useEffect(() => {
     const closeOnOutsideClick = (event: PointerEvent): void => {
       if (!filterMenuRef.current?.contains(event.target as Node)) setFilterOpen(false)
@@ -1156,35 +1360,39 @@ function EventsPage({ events, sources, initialSection = 'events', onSelectSource
   return (
     <div className="page-stack">
       <section className="events-overview">
-        <div><div className="eyebrow">{section === 'events' ? <Activity size={14} /> : <Library size={14} />}{section === 'events' ? '合并后的工作内容' : '原始工作资料库'}</div><h2>{section === 'events' ? `${events.length} 个可追溯工作事项` : `${sources.length} 份原始工作资料`}</h2><p>{section === 'events' ? '相似内容会在日报生成时去重，保留结果、进展和来源证据。' : '按上传日期查看文件和文字记录，点击任意资料即可阅读完整原始内容。'}</p></div>
+        <div><div className="eyebrow">{section === 'events' ? <Activity size={14} /> : <Library size={14} />}{section === 'events' ? '聚合后的工作事项' : '原始工作资料库'}</div><h2>{section === 'events' ? `${workItems.length} 个可追溯工作事项` : `${sources.length} 份原始工作资料`}</h2><p>{section === 'events' ? '同类工作跨日期合并，卡片始终显示最新进展，并保留全部历史事件与来源。' : '严格按真实上传时间排序；正文识别出的工作日期会单独标注，不改变上传时间。'}</p></div>
         <div className="events-overview-actions">
           <div className="events-view-switch" aria-label="工作内容视图"><button className={section === 'events' ? 'active' : ''} onClick={() => setSection('events')}><BriefcaseBusiness size={14} />工作事项</button><button className={section === 'library' ? 'active' : ''} onClick={() => setSection('library')}><Library size={14} />工作资料库</button></div>
-          {section === 'events' && events.length > 0 && <div className={`events-filter-menu ${filterOpen ? 'open' : ''}`} ref={filterMenuRef}>
+          {section === 'events' && workItems.length > 0 && <div className={`events-filter-menu ${filterOpen ? 'open' : ''}`} ref={filterMenuRef}>
             <button className="events-filter-trigger" aria-label="筛选工作事项类型" aria-haspopup="listbox" aria-expanded={filterOpen} onClick={() => setFilterOpen((open) => !open)} onKeyDown={(event) => { if (event.key === 'Escape') setFilterOpen(false) }}><ListFilter size={14} /><span>{typeFilter === 'all' ? '全部类型' : typeFilter}</span><ChevronDown size={14} /></button>
             {filterOpen && <div className="events-filter-popover" role="listbox" aria-label="工作事项类型">
               {filterOptions.map((option) => {
                 const selected = typeFilter === option.value
-                const count = option.value === 'all' ? events.length : events.filter((event) => event.eventType === option.value).length
+                const count = option.value === 'all' ? workItems.length : workItems.filter((item) => item.eventType === option.value).length
                 return <button key={option.value} className={selected ? 'selected' : ''} role="option" aria-selected={selected} onClick={() => { setTypeFilter(option.value); setFilterOpen(false) }}><span>{option.label}<small>{count} 项</small></span>{selected && <Check size={14} />}</button>
               })}
             </div>}
           </div>}
         </div>
       </section>
-      {section === 'events' && (events.length ? <div className="card-grid">
-        {visible.map((event) => {
-          const evidence = event.evidence[0]
-          const evidenceSource = evidence ? sources.find((source) => source.id === evidence.sourceItemId) ?? null : null
-          const expanded = expandedEvidence === event.id
-          return <article className={`entity-card ${expanded ? 'evidence-expanded' : ''}`} key={event.id}>
-            <div className="entity-card-top"><span className="entity-type"><BriefcaseBusiness size={14} />{event.eventType}</span><span>{event.eventDate ?? '日期未定'}</span></div>
-            <h3>{event.title}</h3><p>{event.summary}</p>
-            {evidence && <><button className="mini-evidence" aria-expanded={expanded} onClick={() => setExpandedEvidence(expanded ? null : event.id)}><span><FileText size={13} />“{evidence.quote}”</span><ChevronDown size={14} /></button>{expanded && <div className="evidence-original"><div><strong>原始内容</strong><span>{evidenceSource ? `${sourceDate(evidenceSource)} · ${evidenceSource.title}` : '原始资料暂不可用'}</span></div><p>{evidenceSource?.rawText || evidence.quote}</p>{evidenceSource && <button className="text-button" onClick={() => onSelectSource(evidenceSource)}>打开完整资料 <ArrowRight size={13} /></button>}</div>}</>}
-            <div className="entity-footer"><span>可信度 {Math.round(event.confidence * 100)}%</span><span>{event.evidence.length} 条来源证据</span></div>
+      {section === 'events' && (workItems.length ? <div className="card-grid">
+        {visible.map((item) => {
+          const expanded = expandedEvidence === item.id
+          const history = events.filter((event) => item.eventIds.includes(event.id)).sort((a, b) => (b.eventDate ?? b.updatedAt).localeCompare(a.eventDate ?? a.updatedAt))
+          const mergedSources = item.sourceItemIds.map((sourceId) => sources.find((source) => source.id === sourceId)).filter((source): source is SourceItem => Boolean(source))
+          return <article className={`entity-card work-item-card ${expanded ? 'evidence-expanded' : ''}`} key={item.id}>
+            <div className="entity-card-top"><span className="entity-type"><BriefcaseBusiness size={14} />{item.eventType}</span><div className="entity-card-actions"><span>最近更新 {item.latestDate ?? '日期未定'}</span><button className="card-delete-button" aria-label={`删除工作事项：${item.title}`} title="删除这个工作事项" onClick={() => onRequestDelete(item)}><Trash2 size={15} /></button></div></div>
+            <h3>{item.title}</h3><p>{item.summary}</p>
+            <button className="mini-evidence" aria-expanded={expanded} onClick={() => setExpandedEvidence(expanded ? null : item.id)}><span><Timeline size={13} />{item.eventCount} 次进展 · {item.sourceItemIds.length} 份来源</span><ChevronDown size={14} /></button>
+            {expanded && <div className="work-item-expanded">
+              <section><div className="work-item-section-title"><strong>进展时间线</strong><span>{item.firstDate && item.latestDate ? `${item.firstDate} — ${item.latestDate}` : '日期待确认'}</span></div><div className="work-item-history">{history.map((event) => <article key={event.id}><time>{event.eventDate ?? '日期未定'}</time><div><strong>{event.title}</strong><p>{event.summary}</p></div></article>)}</div></section>
+              <section><div className="work-item-section-title"><strong>全部合并来源</strong><span>{item.evidence.length} 条相关证据</span></div><div className="work-item-sources">{mergedSources.map((source) => { const quotes = item.evidence.filter((evidence) => evidence.sourceItemId === source.id); return <button key={source.id} onClick={() => onSelectSource(source)}><div><FileText size={14} /><span><strong>{source.title}</strong><small>上传于 {formatTimestamp(source.createdAt)}</small></span><ChevronRight size={14} /></div>{quotes[0] && <q>{quotes[0].quote}</q>}{quotes.length > 1 && <small>另有 {quotes.length - 1} 条相关证据</small>}</button> })}</div></section>
+            </div>}
+            <div className="entity-footer"><span>可信度 {Math.round(item.confidence * 100)}%</span><span>{item.eventCount} 个日期事件 · {item.sourceItemIds.length} 份资料</span></div>
           </article>
         })}
       </div> : <EmptyState large icon={<BriefcaseBusiness size={34} />} title="还没有合并后的工作事项" text="生成第一份日报后，关键进展、会议、交付、问题和决策会显示在这里。" />)}
-      {section === 'library' && (sourceLibrary.length ? <section className="source-library panel"><div className="source-library-head"><span>资料名称</span><span>类型</span><span>上传日期</span><span>状态</span></div>{sourceLibrary.map((source) => <button className="source-library-row" key={source.id} onClick={() => onSelectSource(source)}><div><div className={`file-kind ${source.kind}`}><FileText size={15} /></div><span><strong>{source.title}</strong><small>{source.excerpt || '未提取到文字'}</small></span></div><span className="source-library-kind">{source.kind.toUpperCase()}</span><time>{sourceDate(source)}<small>{formatTimestamp(source.createdAt).split(' ')[1] ?? ''}</small></time><StatusPill status={source.status} /><ChevronRight size={15} /></button>)}</section> : <EmptyState large icon={<Library size={34} />} title="工作资料库还是空的" text="通过每日记录或批量上传添加资料后，可以在这里按日期回看原始内容。" />)}
+      {section === 'library' && (sourceLibrary.length ? <section className="source-library panel"><div className="source-library-head"><span>资料名称</span><span>类型</span><span>上传时间</span><span>状态</span></div>{sourceLibrary.map((source) => { const uploaded = formatTimestamp(source.createdAt).split(' '); return <button className="source-library-row" key={source.id} onClick={() => onSelectSource(source)}><div><div className={`file-kind ${source.kind}`}><FileText size={15} /></div><span><strong>{source.title}</strong><small>{source.workDates.length ? `涉及工作日：${formatWorkDateRange(source.workDates)}` : source.excerpt || '尚未识别出明确工作日期'}</small></span></div><span className="source-library-kind">{source.kind.toUpperCase()}</span><time>{uploaded[0]}<small>{uploaded[1] ?? ''}</small></time><StatusPill status={source.status} /><ChevronRight size={15} /></button>})}</section> : <EmptyState large icon={<Library size={34} />} title="工作资料库还是空的" text="通过每日记录或批量上传添加资料后，可以在这里按日期回看原始内容。" />)}
     </div>
   )
 }
@@ -1203,12 +1411,13 @@ function ExportPage({ snapshot, notify, fail }: { snapshot: AppSnapshot; notify:
       const date = value.slice(0, 10)
       return date >= fromDate && date <= toDate
     }
-    const sources = snapshot.sources.filter((source) => inRange(source.businessDate ?? source.createdAt))
-    const sourceIds = new Set(sources.map((source) => source.id))
+    const sources = snapshot.sources.filter((source) => source.workDates.length
+      ? source.workDates.some((date) => inRange(date))
+      : inRange(source.businessDate))
     return {
       sources: sources.length,
       briefs: snapshot.dailyBriefs.filter((brief) => inRange(brief.workDate)).length,
-      events: snapshot.events.filter((event) => sourceIds.has(event.sourceItemId) || inRange(event.eventDate ?? event.createdAt)).length
+      events: snapshot.events.filter((event) => inRange(event.eventDate)).length
     }
   }, [exportReady, fromDate, snapshot, toDate])
   const runExport = async (format: ExportRequest['format']): Promise<void> => {
@@ -1457,7 +1666,7 @@ function SettingsPage({ notify, fail }: { notify: (message: string) => void; fai
   )
 }
 
-function SourceDrawer({ source, onClose }: { source: SourceItem; onClose: () => void }): ReactNode {
+function SourceDrawer({ source, onClose, onDelete }: { source: SourceItem; onClose: () => void; onDelete: (source: SourceItem) => Promise<void> }): ReactNode {
   const [assets, setAssets] = useState<Asset[]>([])
   const [previewUrls, setPreviewUrls] = useState<Record<string, string>>({})
   const [assetsLoading, setAssetsLoading] = useState(true)
@@ -1467,6 +1676,13 @@ function SourceDrawer({ source, onClose }: { source: SourceItem; onClose: () => 
   const [assetError, setAssetError] = useState('')
   const [assetNotice, setAssetNotice] = useState('')
   const [openingAssetId, setOpeningAssetId] = useState<string | null>(null)
+  const [confirmDelete, setConfirmDelete] = useState(false)
+  const [deleting, setDeleting] = useState(false)
+  const cancelDeleteRef = useRef<HTMLButtonElement>(null)
+
+  useEffect(() => {
+    if (confirmDelete) cancelDeleteRef.current?.focus()
+  }, [confirmDelete])
 
   useEffect(() => {
     let active = true
@@ -1523,10 +1739,19 @@ function SourceDrawer({ source, onClose }: { source: SourceItem; onClose: () => 
       setOpeningAssetId(null)
     }
   }
+  const deleteCurrentSource = async (): Promise<void> => {
+    setDeleting(true)
+    try {
+      await onDelete(source)
+    } finally {
+      setDeleting(false)
+    }
+  }
 
   return <div className="drawer-backdrop" onMouseDown={onClose}><aside className="source-drawer" onMouseDown={(event) => event.stopPropagation()}>
-    <div className="drawer-header"><div><span>{source.kind.toUpperCase()} · {sourceDate(source)}</span><h2>{source.title}</h2></div><button className="icon-button" aria-label="关闭原始资料" onClick={onClose}><X size={18} /></button></div>
+    <div className="drawer-header"><div><span>{source.kind.toUpperCase()} · 上传于 {formatTimestamp(source.createdAt).split(' ')[0]}</span><h2>{source.title}</h2></div><div className="drawer-header-actions"><button className="danger-text-button" onClick={() => setConfirmDelete(true)}><Trash2 size={14} />删除资料</button><button className="icon-button" aria-label="关闭原始资料" onClick={onClose}><X size={18} /></button></div></div>
     <div className="drawer-meta"><StatusPill status={source.status} /><span><Archive size={13} />{source.assetCount} 个附件</span><span><Clock3 size={13} />{formatTimestamp(source.createdAt)}</span></div>
+    {source.workDates.length > 0 && <div className="source-work-dates"><span>识别到的工作日期</span><div>{source.workDates.map((date) => <button key={date} type="button" title="该日期来自相关工作事件">{friendlyDate(date)}</button>)}</div></div>}
     {source.error && <div className="error-box"><CircleAlert size={16} />{source.error}</div>}
     <div className="raw-content"><div className="raw-label"><FileText size={14} />原始内容</div><pre>{source.rawText || '这份文件没有提取到可显示文字，原件仍保存在本地。'}</pre></div>
     <section className="source-attachments"><div className="attachments-heading"><div><strong>附件</strong><span>点击缩略图预览，或直接打开原件</span></div><small>{assets.length || source.assetCount} 个</small></div>
@@ -1541,7 +1766,7 @@ function SourceDrawer({ source, onClose }: { source: SourceItem; onClose: () => 
       {assetNotice && <div className="asset-success"><CheckCircle2 size={13} />{assetNotice}</div>}
     </section>
     {previewAsset && <div className="asset-preview-backdrop" onMouseDown={() => setPreviewAsset(null)}><section className="asset-preview-dialog" onMouseDown={(event) => event.stopPropagation()}><header><div><span>{attachmentTypeLabel(previewAsset)} · {formatFileSize(previewAsset.byteSize)}</span><h3>{previewAsset.originalName}</h3></div><button className="icon-button" aria-label="关闭附件预览" onClick={() => setPreviewAsset(null)}><X size={17} /></button></header><div className="asset-preview-body">{previewLoading ? <div className="attachment-preview-state"><LoaderCircle className="spin" size={22} />正在生成预览</div> : previewAsset.mimeType.startsWith('image/') && previewData?.dataUrl ? <img src={previewData.dataUrl} alt={previewAsset.originalName} /> : previewAsset.mimeType === 'application/pdf' && previewData?.dataUrl ? <iframe title={previewAsset.originalName} src={previewData.dataUrl} /> : previewAsset.extractedText ? <pre>{previewAsset.extractedText}</pre> : <div className="attachment-preview-state"><FileText size={30} /><strong>此格式使用系统应用查看</strong><span>可以点击下方按钮打开原件</span></div>}</div><footer>{assetNotice && <span className="asset-open-notice"><CheckCircle2 size={13} />{assetNotice}</span>}<button className="secondary-button" disabled={openingAssetId === previewAsset.id} onClick={() => void openAsset(previewAsset)}>{openingAssetId === previewAsset.id ? <LoaderCircle className="spin" size={13} /> : null}{openingAssetId === previewAsset.id ? '正在打开' : '打开原件'} <ArrowRight size={13} /></button></footer></section></div>}
-  </aside></div>
+  </aside>{confirmDelete && <div className="delete-confirm-layer" onMouseDown={(event) => event.stopPropagation()}><section className="delete-confirm-dialog" role="alertdialog" aria-modal="true" aria-labelledby="delete-source-title" aria-describedby="delete-source-description"><div className="delete-confirm-icon"><Trash2 size={20} /></div><h3 id="delete-source-title">删除这份工作资料？</h3><p id="delete-source-description">将删除原始资料、附件以及只由它产生的时间线事件；与其他资料合并的工作事项会保留剩余来源。</p><strong>{source.title}</strong><div><button ref={cancelDeleteRef} className="secondary-button" disabled={deleting} onClick={() => setConfirmDelete(false)}>取消</button><button className="danger-button" disabled={deleting} onClick={() => void deleteCurrentSource()}>{deleting ? <LoaderCircle className="spin" size={14} /> : <Trash2 size={14} />}{deleting ? '正在删除' : '确认删除'}</button></div></section></div>}</div>
 }
 
 function SearchPopover({ query, results, onClose, onOpen }: { query: string; results: SearchHit[]; onClose: () => void; onOpen: (result: SearchHit) => void }): ReactNode {
@@ -1623,8 +1848,12 @@ function todayLocal(): string {
   const offset = date.getTimezoneOffset() * 60_000
   return new Date(date.getTime() - offset).toISOString().slice(0, 10)
 }
-function sourceDate(source: SourceItem): string {
-  return (source.businessDate ?? source.createdAt).slice(0, 10)
+function sourceWorkDates(source: SourceItem): string[] {
+  if (source.workDates.length) return source.workDates
+  return source.businessDate ? [source.businessDate.slice(0, 10)] : []
+}
+function sourceHasWorkDate(source: SourceItem, date: string): boolean {
+  return sourceWorkDates(source).includes(date)
 }
 function imageExtension(mimeType: string): string {
   if (mimeType === 'image/jpeg') return 'jpg'
@@ -1645,11 +1874,14 @@ function friendlyDate(date: string): string {
   if (date === todayLocal()) return '今天'
   return `${Number(date.slice(5, 7))} 月 ${Number(date.slice(8, 10))} 日`
 }
-function monthLabel(date: string): string {
-  return `${Number(date.slice(5, 7))}月`
-}
 function formatTimestamp(value: string): string {
   return new Date(value).toLocaleString('zh-CN', { hour12: false })
+}
+function formatWorkDateRange(values: string[]): string {
+  const dates = Array.from(new Set(values)).sort()
+  if (!dates.length) return '日期待确认'
+  if (dates.length === 1) return dates[0]!
+  return `${dates[0]} — ${dates.at(-1)}（${dates.length} 天）`
 }
 function estimateSpeakingTime(script: string): number {
   return Math.max(1, Math.ceil(script.replace(/\s/g, '').length / 260))

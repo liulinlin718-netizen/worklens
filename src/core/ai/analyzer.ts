@@ -7,6 +7,7 @@ import type {
   ModelInfo,
   ProviderSettings,
   SaveProviderSettings,
+  SourceItem,
   WorkQuestionAnswer
 } from '@shared/contracts'
 import { normalizeEntityKey } from '@core/domain'
@@ -32,6 +33,34 @@ export class AnalysisService {
   ): Promise<DailyBrief> {
     const sources = this.database.listSourcesForDate(workDate)
     if (!sources.length) throw new Error('这一天还没有可整理的工作内容')
+    const brief = await this.analyzeSources(sources, workDate, onProgress, signal)
+    if (!brief) throw new Error('资料中没有识别到这个工作日的内容，请先核对日期')
+    return brief
+  }
+
+  async analyzeSource(
+    sourceItemId: string,
+    onProgress?: (message: string) => void,
+    signal?: AbortSignal
+  ): Promise<DailyBrief | null> {
+    const source = this.database.getSource(sourceItemId)
+    const initialBrief = await this.analyzeSources([source], source.businessDate, onProgress, signal)
+    const refreshed = this.database.getSource(sourceItemId)
+    const related = new Map<string, SourceItem>([[refreshed.id, refreshed]])
+    for (const workDate of refreshed.workDates) {
+      for (const candidate of this.database.listSourcesForDate(workDate)) related.set(candidate.id, candidate)
+    }
+    if (related.size <= 1) return initialBrief
+    onProgress?.(`发现 ${related.size} 份同日资料，正在重新比对并合并同类工作`)
+    return this.analyzeSources(Array.from(related.values()), null, onProgress, signal)
+  }
+
+  private async analyzeSources(
+    sources: SourceItem[],
+    requestedWorkDate: string | null,
+    onProgress?: (message: string) => void,
+    signal?: AbortSignal
+  ): Promise<DailyBrief | null> {
     const sourceItemIds = sources.map((source) => source.id)
     const primarySourceId = sourceItemIds[0]!
     const text = sources
@@ -41,6 +70,12 @@ export class AnalysisService {
 
     const settings = await this.getProviderSettings()
     const configuration = await this.getProviderConfiguration(settings)
+    const existingWorkItems = this.database.listWorkItems().slice(0, 200).map((item) => ({
+      key: item.key,
+      title: item.title,
+      latestDate: item.latestDate,
+      summary: item.summary
+    }))
     const chunks = splitText(text, MAX_CHUNK_CHARACTERS)
     const jobId = this.database.createJob(primarySourceId, 'daily_synthesis', '准备合并当日工作')
     const aiRunId = this.database.createAiRun(primarySourceId, settings.kind, settings.model)
@@ -60,10 +95,13 @@ export class AnalysisService {
           configuration,
           {
             sourceItemId: primarySourceId,
-            title: `${workDate} 工作日报（${sources.length} 份资料）`,
+            title: requestedWorkDate
+              ? `${requestedWorkDate} 工作日报（${sources.length} 份资料）`
+              : `跨日期工作资料（${sources.length} 份）`,
             text: chunks[index] ?? '',
-            businessDate: workDate,
-            referenceDate: new Date().toISOString().slice(0, 10)
+            businessDate: requestedWorkDate,
+            referenceDate: new Date().toISOString().slice(0, 10),
+            existingWorkItems
           },
           signal
         )
@@ -73,16 +111,20 @@ export class AnalysisService {
       }
 
       const merged = mergeAnalysisResults(results)
+      const fallbackDate = requestedWorkDate
+        ?? merged.dailyBriefs[0]?.workDate
+        ?? merged.events.find((event) => event.eventDate)?.eventDate
+        ?? sources[0]!.createdAt.slice(0, 10)
       const brief = this.database.saveDailySynthesis(
         sourceItemIds,
         merged,
         responseProvider,
         responseModel,
-        workDate
+        fallbackDate
       )
-      this.database.updateJob(jobId, 'finished', 1, '早会逐字稿已生成')
+      this.database.updateJob(jobId, 'finished', 1, brief ? '早会逐字稿已生成' : '工作内容已整理，日期待确认')
       this.database.finishAiRun(aiRunId, 'finished')
-      onProgress?.('明日早会逐字稿已生成')
+      onProgress?.(brief ? '明日早会逐字稿已生成' : '工作内容已整理，未确认日期的事项不会进入时间线')
       return brief
     } catch (error) {
       const message = toErrorMessage(error)
@@ -93,19 +135,6 @@ export class AnalysisService {
       }
       throw error
     }
-  }
-
-  async analyzeSource(
-    sourceItemId: string,
-    onProgress?: (message: string) => void,
-    signal?: AbortSignal
-  ): Promise<DailyBrief> {
-    const source = this.database.getSource(sourceItemId)
-    return this.analyzeWorkDate(
-      (source.businessDate ?? source.createdAt).slice(0, 10),
-      onProgress,
-      signal
-    )
   }
 
   async askWorkQuestion(
@@ -311,7 +340,8 @@ export function mergeAnalysisResults(results: AnalysisResult[]): AnalysisResult 
 
   const eventMap = new Map<string, AnalysisResult['events'][number]>()
   for (const event of results.flatMap((result) => result.events)) {
-    const key = `${normalizeEntityKey(event.title)}:${event.eventDate ?? ''}`
+    const workItemKey = normalizeEntityKey(event.workItemKey) || normalizeEntityKey(event.workItemTitle) || normalizeEntityKey(event.title)
+    const key = `${workItemKey}:${event.eventDate ?? ''}`
     const existing = eventMap.get(key)
     if (!existing) {
       eventMap.set(key, event)
@@ -320,10 +350,26 @@ export function mergeAnalysisResults(results: AnalysisResult[]): AnalysisResult 
     existing.evidence = uniqueEvidence([...existing.evidence, ...event.evidence])
     if (event.summary.length > existing.summary.length) existing.summary = event.summary
     existing.confidence = Math.max(existing.confidence, event.confidence)
+    if (!existing.workItemKey && event.workItemKey) existing.workItemKey = event.workItemKey
+    if (!existing.workItemTitle && event.workItemTitle) existing.workItemTitle = event.workItemTitle
   }
 
   const summaries = results.map((result) => result.summary)
   const standups = results.map((result) => result.standup)
+  const dailyBriefMap = new Map<string, AnalysisResult['dailyBriefs'][number]>()
+  for (const brief of results.flatMap((result) => result.dailyBriefs)) {
+    const existing = dailyBriefMap.get(brief.workDate)
+    if (!existing) {
+      dailyBriefMap.set(brief.workDate, { ...brief })
+      continue
+    }
+    existing.completed = uniqueStrings([...existing.completed, ...brief.completed])
+    existing.inProgress = uniqueStrings([...existing.inProgress, ...brief.inProgress])
+    existing.blockers = uniqueStrings([...existing.blockers, ...brief.blockers])
+    existing.nextSteps = uniqueStrings([...existing.nextSteps, ...brief.nextSteps])
+    if (brief.overview.length > existing.overview.length) existing.overview = brief.overview
+    if (brief.script.length > existing.script.length) existing.script = brief.script
+  }
   const completed = uniqueStrings(standups.flatMap((item) => item.completed))
   const inProgress = uniqueStrings(standups.flatMap((item) => item.inProgress))
   const blockers = uniqueStrings(standups.flatMap((item) => item.blockers))
@@ -332,6 +378,7 @@ export function mergeAnalysisResults(results: AnalysisResult[]): AnalysisResult 
   return {
     sourceDate,
     events: Array.from(eventMap.values()),
+    dailyBriefs: Array.from(dailyBriefMap.values()).sort((a, b) => a.workDate.localeCompare(b.workDate)),
     summary: {
       title: summaries[0]?.title ?? '工作摘要',
       content: summaries.map((summary) => summary.content).filter(Boolean).join('\n\n'),
@@ -353,7 +400,7 @@ export function mergeAnalysisResults(results: AnalysisResult[]): AnalysisResult 
 }
 
 function uniqueEvidence<T extends { quote: string }>(values: T[]): T[] {
-  return Array.from(new Map(values.map((value) => [value.quote, value])).values()).slice(0, 10)
+  return Array.from(new Map(values.map((value) => [value.quote, value])).values()).slice(0, 50)
 }
 
 function uniqueStrings(values: string[]): string[] {
