@@ -31,7 +31,7 @@ export class UtilityAiRuntime implements AiRuntime {
         stateRoot: this.stateRoot
       },
       signal,
-      5 * 60_000
+      12 * 60_000
     )
     return value as AnalysisResponse
   }
@@ -63,7 +63,7 @@ export class UtilityAiRuntime implements AiRuntime {
         stateRoot: this.stateRoot
       },
       signal,
-      5 * 60_000
+      12 * 60_000
     )
     return value as KnowledgeQuestionResponse
   }

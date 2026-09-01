@@ -331,7 +331,10 @@ export const ProviderSettingsSchema = z.object({
   baseUrl: z.string().trim().max(500).default(''),
   hasApiKey: z.boolean().default(false),
   sendImages: z.boolean().default(false),
-  autoAnalyze: z.boolean().default(true)
+  autoAnalyze: z.boolean().default(true),
+  connected: z.boolean().default(false),
+  connectedAt: z.iso.datetime().nullable().default(null),
+  connectionMessage: z.string().trim().max(500).default('未连接 AI')
 })
 export type ProviderSettings = z.infer<typeof ProviderSettingsSchema>
 
@@ -430,6 +433,7 @@ export interface ImportResult {
   duplicates: Array<{ fileName: string; source: SourceItem }>
   failed: Array<{ fileName: string; error: string; sourceItemId: string | null }>
   cancelled: boolean
+  analysisSkipped?: string | null
 }
 
 export interface JobProgressEvent {
@@ -457,6 +461,7 @@ export interface WorkLensApi {
   importDroppedFiles(files: File[]): Promise<ImportResult>
   cancelImport(): Promise<ActionResult>
   retryImportSource(sourceItemId: string): Promise<ImportResult>
+  reanalyzeSource(sourceItemId: string): Promise<ActionResult>
   deleteSource(sourceItemId: string): Promise<ActionResult>
   deleteWorkEvent(eventId: string): Promise<ActionResult>
   deleteWorkItem(workItemKey: string): Promise<ActionResult>

@@ -15,10 +15,12 @@ export interface ProviderCapabilities {
 }
 
 export interface AnalysisRequest {
+  mode?: 'initial' | 'fallback_refinement'
   sourceItemId: string
   title: string
   text: string
   businessDate: string | null
+  fallbackDate: string
   referenceDate: string
   existingWorkItems: Array<{ key: string; title: string; latestDate: string | null; summary: string }>
 }

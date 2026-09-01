@@ -83,6 +83,7 @@ import type {
   WorkEvent,
   WorkItem
 } from '@shared/contracts'
+import { getTimelineHistoryWindow } from './timeline-window'
 
 type NavKey = 'dashboard' | 'capture' | 'batch' | 'briefs' | 'ask' | 'timeline' | 'events' | 'export' | 'settings'
 
@@ -363,7 +364,7 @@ export function App(): ReactNode {
                 <AskWorkPage snapshot={snapshot} entries={workChat} setEntries={setWorkChat} onOpenCitation={openWorkCitation} fail={fail} />
               )}
               {activeNav === 'timeline' && <TimelinePage snapshot={snapshot} onSelect={setSelectedSource} onRequestDelete={(event) => setPendingWorkContentDeletion({ kind: 'event', event })} />}
-              {activeNav === 'events' && <EventsPage key={eventsInitialSection} workItems={snapshot.workItems} events={snapshot.events} sources={snapshot.sources} initialSection={eventsInitialSection} onSelectSource={setSelectedSource} onRequestDelete={(item) => setPendingWorkContentDeletion({ kind: 'workItem', item })} />}
+              {activeNav === 'events' && <EventsPage key={eventsInitialSection} workItems={snapshot.workItems} events={snapshot.events} sources={snapshot.sources} initialSection={eventsInitialSection} onSelectSource={setSelectedSource} onRequestDelete={(item) => setPendingWorkContentDeletion({ kind: 'workItem', item })} onChanged={loadSnapshot} notify={notify} fail={fail} />}
               {activeNav === 'export' && <ExportPage snapshot={snapshot} notify={notify} fail={fail} />}
               {activeNav === 'settings' && <SettingsPage notify={notify} fail={fail} />}
             </>
@@ -485,11 +486,22 @@ function CapturePage({ sources, onSelect, onChanged, openBrief, notify, fail }: 
     if (!text.trim()) return
     setBusy(true)
     try {
-      await window.worklens.captureText({ title: title.trim(), text: text.trim(), businessDate: date })
+      const saved = await window.worklens.captureText({ title: title.trim(), text: text.trim(), businessDate: date })
       setTitle('')
       setText('')
       await onChanged()
-      notify('工作内容已保存，正在自动合并日报')
+      const provider = await window.worklens.getProviderSettings()
+      if (saved.status === 'failed') {
+        fail(new Error('工作内容已保存，但自动整理失败，可在工作资料中重试'))
+      } else if (saved.status === 'queued') {
+        if (provider.autoAnalyze && !provider.connected) {
+          fail(new Error('未连接 AI，工作内容已保存但未整理'))
+        } else {
+          notify('工作内容已保存，自动整理当前已关闭')
+        }
+      } else {
+        notify('工作内容已读取，并按工作时间完成整理')
+      }
     } catch (error) {
       fail(error)
     } finally {
@@ -589,7 +601,9 @@ function BatchUploadPage({ snapshot, progress, onSelect, onChanged, openTimeline
       return b.date.localeCompare(a.date)
     })
   }, [result, snapshot.sources])
+  const failedSourceIds = new Set((result?.failed ?? []).flatMap((item) => item.sourceItemId ? [item.sourceItemId] : []))
   const fallbackCount = result?.imported.filter((source) => {
+    if (failedSourceIds.has(source.id)) return false
     const current = snapshot.sources.find((item) => item.id === source.id) ?? source
     return !current.workDates.length && !current.businessDate
   }).length ?? 0
@@ -713,6 +727,10 @@ function BatchUploadPage({ snapshot, progress, onSelect, onChanged, openTimeline
         }
       }
       if (cancelRequestedRef.current) next.cancelled = true
+      const provider = await window.worklens.getProviderSettings()
+      if (provider.autoAnalyze && !provider.connected && next.imported.some((source) => source.status === 'queued')) {
+        next.analysisSkipped = '未连接 AI，资料已保存但未整理'
+      }
       setResult(next)
       await onChanged()
       if (!next.cancelled) {
@@ -721,6 +739,7 @@ function BatchUploadPage({ snapshot, progress, onSelect, onChanged, openTimeline
       }
       setPhase('review')
       if (next.cancelled) notify('已停止处理；完成的资料已保留，待处理列表仍在')
+      else if (next.analysisSkipped) fail(new Error(next.analysisSkipped))
       else if (next.failed.length) notify(`处理完成：新增 ${next.imported.length} 项，${next.failed.length} 项需要处理`)
       else if (next.imported.length) notify(`已归档 ${next.imported.length} 项资料`)
       else notify('这批资料都已存在，没有重复写入')
@@ -801,7 +820,7 @@ function BatchUploadPage({ snapshot, progress, onSelect, onChanged, openTimeline
         <div>
           <div className="eyebrow"><Upload size={14} />跨日期批量导入</div>
           <h2>{phase === 'compose' ? '先把资料放进待处理列表' : phase === 'processing' ? '正在逐项解析处理' : '检查这批资料的归档结果'}</h2>
-          <p>{phase === 'compose' ? '选择文件、拖入资料或粘贴文字；确认列表无误后再开始，不会一选中就写入。' : phase === 'processing' ? '每项资料独立处理，取消时已完成的内容仍会安全保留。' : '重点检查黄色的日期项和红色的失败项，确认后即可去时间线回看。'}</p>
+          <p>{phase === 'compose' ? '选择文件、拖入资料或粘贴文字；确认列表无误后再开始，不会一选中就写入。' : phase === 'processing' ? '正在读取正文、识别工作时间并总结工作事项；取消时已完成的内容仍会安全保留。' : '系统已按正文中的工作时间完成归档；复核失败项后即可去时间线回看。'}</p>
         </div>
         <div className="batch-stepper" aria-label="批量上传进度">
           {['添加资料', '解析处理', '校对结果'].map((label, index) => <div className={`${index === phaseIndex ? 'active' : ''} ${index < phaseIndex ? 'completed' : ''}`} key={label}><span>{index < phaseIndex ? <Check size={12} /> : index + 1}</span><strong>{label}</strong></div>)}
@@ -865,21 +884,21 @@ function BatchUploadPage({ snapshot, progress, onSelect, onChanged, openTimeline
             <div><span>成功导入</span><strong>{result.imported.length}</strong><small>份新增资料</small></div>
             <div><span>归档工作日</span><strong>{groups.length}</strong><small>个日期</small></div>
             <div><span>重复跳过</span><strong>{result.duplicates.length}</strong><small>不会重复入库</small></div>
-            <div className={result.failed.length || fallbackCount ? 'warn' : ''}><span>需要留意</span><strong>{result.failed.length + fallbackCount}</strong><small>{result.failed.length} 份失败 · {fallbackCount} 份待校日期</small></div>
+            <div className={result.failed.length || fallbackCount ? 'warn' : ''}><span>需要留意</span><strong>{result.failed.length + fallbackCount}</strong><small>{result.failed.length} 份失败 · {fallbackCount} 份待理解</small></div>
           </section>
 
           <section className="batch-results panel">
-            <div className="panel-header"><div><h2>本次归档结果</h2><p>日期可以直接修改；修改后对应工作日会自动重新整理</p></div><div className="batch-result-actions"><button className="secondary-button" disabled={busy} onClick={resetForNextBatch}>{result.cancelled ? '返回待处理列表' : '再导入一批'}</button><button className="primary-button" onClick={openTimeline}><Timeline size={15} />完成并查看时间线</button></div></div>
-            {fallbackCount > 0 && <div className="batch-review-warning"><CircleAlert size={15} /><span>{fallbackCount} 项没有识别到明确工作日期：不会按上传日写入时间线，可在原始资料中核对后再补充日期。</span></div>}
+            <div className="panel-header"><div><h2>本次归档结果</h2><p>系统已读取正文并按其中的工作时间归档；日期仍可手动修正</p></div><div className="batch-result-actions"><button className="secondary-button" disabled={busy} onClick={resetForNextBatch}>{result.cancelled ? '返回待处理列表' : '再导入一批'}</button><button className="primary-button" onClick={openTimeline}><Timeline size={15} />完成并查看时间线</button></div></div>
+            {fallbackCount > 0 && <div className="batch-review-warning"><CircleAlert size={15} /><span>{fallbackCount} 项尚未完成正文时间理解；系统会优先读取资料中的工作时间，AI 连接异常时可重新整理或手动补充日期。</span></div>}
             <div className="batch-date-groups">
               {groups.map((group) => (
                 <section className="batch-date-group" key={group.date}>
-                  <div className="batch-date-heading"><div className="batch-date-icon"><CalendarDays size={15} /></div><div><strong>{group.date === 'pending' ? '工作日期待确认' : group.date}</strong><span>{group.date === 'pending' ? '未使用上传日期代替' : `${friendlyDate(group.date)} · ${group.sources.length} 份资料`}</span></div><small className={group.date === 'pending' ? 'pending' : ''}>{group.date === 'pending' ? '未进入时间线' : '已归入时间线'}</small></div>
+                  <div className="batch-date-heading"><div className="batch-date-icon"><CalendarDays size={15} /></div><div><strong>{group.date === 'pending' ? '正在理解工作时间' : group.date}</strong><span>{group.date === 'pending' ? '等待按正文内容分配' : `${friendlyDate(group.date)} · ${group.sources.length} 份资料`}</span></div><small className={group.date === 'pending' ? 'pending' : ''}>{group.date === 'pending' ? '等待整理' : '已归入时间线'}</small></div>
                   <div className="batch-source-list">
                     {group.sources.map((source) => (
                       <div className="batch-source-row" key={source.id}>
                         <button className="batch-source-open" onClick={() => onSelect(source)}><div className={`file-kind ${source.kind}`}><FileText size={15} /></div><div><strong>{source.title}</strong><span>{source.excerpt || '未提取到文字'}</span></div><ChevronRight size={15} /></button>
-                        <div className="batch-date-editor"><span className={`date-origin-badge ${source.workDates.length || source.businessDate ? '' : 'fallback'} ${source.dateOrigin === 'manual' ? 'manual' : ''}`}>{source.dateOrigin === 'manual' ? '手动修正' : source.workDates.length > 1 ? `识别 ${source.workDates.length} 个工作日` : source.workDates.length === 1 || source.businessDate ? '正文识别' : '日期待确认'}</span>{source.workDates.length <= 1 && <label><span>整份资料工作日</span><input type="date" aria-label={`${source.title}整份资料工作日`} value={source.businessDate ?? source.workDates[0] ?? ''} disabled={editingDateId === source.id} onChange={(event) => void updateDate(source, event.target.value)} /></label>}{source.workDates.length > 1 && <span className="batch-multi-date-note">多日内容已逐条归类</span>}{editingDateId === source.id && <LoaderCircle className="spin" size={14} />}</div>
+                        <div className="batch-date-editor"><span className={`date-origin-badge ${source.workDates.length || source.businessDate ? '' : 'fallback'} ${source.dateOrigin === 'manual' ? 'manual' : ''}`}>{source.dateOrigin === 'manual' ? '手动修正' : source.workDates.length > 1 ? `识别 ${source.workDates.length} 个工作日` : source.workDates.length === 1 || source.businessDate ? '正文识别' : '等待理解'}</span>{source.workDates.length <= 1 && <label><span>整份资料工作日</span><input type="date" aria-label={`${source.title}整份资料工作日`} value={source.businessDate ?? source.workDates[0] ?? ''} disabled={editingDateId === source.id} onChange={(event) => void updateDate(source, event.target.value)} /></label>}{source.workDates.length > 1 && <span className="batch-multi-date-note">多日内容已逐条归类</span>}{editingDateId === source.id && <LoaderCircle className="spin" size={14} />}</div>
                       </div>
                     ))}
                   </div>
@@ -888,7 +907,7 @@ function BatchUploadPage({ snapshot, progress, onSelect, onChanged, openTimeline
               {!result.imported.length && <EmptyState icon={<Upload size={27} />} title="这次没有新增资料" text="重复文件已安全跳过；失败文件可以在下方直接重试。" />}
             </div>
 
-            {result.duplicates.length > 0 && <div className="batch-duplicates"><div><CheckCircle2 size={15} /><strong>{result.duplicates.length} 份重复资料已跳过</strong><span>数据库中的原记录保持不变</span></div>{result.duplicates.map((item, index) => <button key={`${item.source.id}:${item.fileName}:${index}`} onClick={() => onSelect(item.source)}><div><strong>{item.fileName}</strong><span>{item.source.workDates.length ? `涉及工作日 ${formatWorkDateRange(item.source.workDates)}` : '工作日期待确认'} · {item.source.title}</span></div><ChevronRight size={14} /></button>)}</div>}
+            {result.duplicates.length > 0 && <div className="batch-duplicates"><div><CheckCircle2 size={15} /><strong>{result.duplicates.length} 份重复资料已跳过</strong><span>数据库中的原记录保持不变</span></div>{result.duplicates.map((item, index) => <button key={`${item.source.id}:${item.fileName}:${index}`} onClick={() => onSelect(item.source)}><div><strong>{item.fileName}</strong><span>{item.source.workDates.length ? `涉及工作日 ${formatWorkDateRange(item.source.workDates)}` : '等待理解工作时间'} · {item.source.title}</span></div><ChevronRight size={14} /></button>)}</div>}
 
             {result.failed.length > 0 && <div className="batch-failures"><div><CircleAlert size={15} /><strong>{result.failed.length} 份文件需要处理</strong></div>{result.failed.map((item, index) => <div className="batch-failure-row" key={`${item.sourceItemId ?? item.fileName}:${index}`}><div><strong>{item.fileName}</strong><span>{item.error}</span></div>{item.sourceItemId ? <button className="secondary-button" disabled={busy} onClick={() => void retryFailure(item.sourceItemId!)}>{retryingId === item.sourceItemId ? <LoaderCircle className="spin" size={13} /> : <RefreshCw size={13} />}重新解析</button> : <small>请确认格式和文件大小后重新选择</small>}</div>)}</div>}
           </section>
@@ -912,7 +931,8 @@ function mergeImportResults(current: ImportResult | null, next: ImportResult): I
     imported: Array.from(imported.values()),
     duplicates: Array.from(duplicates.values()),
     failed: Array.from(failed.values()),
-    cancelled: current.cancelled || next.cancelled
+    cancelled: current.cancelled || next.cancelled,
+    analysisSkipped: next.analysisSkipped ?? current.analysisSkipped ?? null
   }
 }
 
@@ -1298,14 +1318,15 @@ function TimelinePage({ snapshot, onSelect, onRequestDelete }: { snapshot: AppSn
 
   if (!groups.length) return <EmptyState large icon={<Clock3 size={34} />} title="时间线等待第一条工作内容" text="日报生成并沉淀工作事项后，会按工作日显示在这里。" />
   const activeIndex = Math.max(0, groups.findIndex((group) => group.date === activeDate))
+  const historyWindow = getTimelineHistoryWindow(groups, activeIndex)
   return (
     <div ref={timelinePageRef} className="timeline-page">
       <aside className={`timeline-history-index ${historyRailBox ? 'measured' : ''}`} aria-label="工作日期历史索引" style={historyRailBox ?? undefined}>
         <nav ref={historyMarkersRef} className="timeline-history-markers" aria-label="工作日期从早到晚排列，可点击或使用鼠标滚轮切换">
-          {groups.map((group, index) => {
+          {historyWindow.map(({ item: group, index }) => {
             const active = activeDate === group.date
             const distance = Math.abs(index - activeIndex)
-            const tickWidth = active ? 22 : distance === 1 ? 16 : distance === 2 ? 12 : distance === 3 ? 9 : 7
+            const tickWidth = active ? 18 : distance === 1 ? 13 : distance === 2 ? 10 : distance === 3 ? 8 : 6
             const spokenTitles = group.events.slice(0, 2).map((event) => event.title).join('、')
             const remaining = Math.max(0, group.events.length - 2)
             const label = `${friendlyDate(group.date)}，${group.events.length} 项工作内容：${spokenTitles}${remaining ? `，另有 ${remaining} 项` : ''}`
@@ -1340,11 +1361,12 @@ function TimelinePage({ snapshot, onSelect, onRequestDelete }: { snapshot: AppSn
   )
 }
 
-function EventsPage({ workItems, events, sources, initialSection = 'events', onSelectSource, onRequestDelete }: { workItems: WorkItem[]; events: WorkEvent[]; sources: SourceItem[]; initialSection?: 'events' | 'library'; onSelectSource: (source: SourceItem) => void; onRequestDelete: (item: WorkItem) => void }): ReactNode {
+function EventsPage({ workItems, events, sources, initialSection = 'events', onSelectSource, onRequestDelete, onChanged, notify, fail }: { workItems: WorkItem[]; events: WorkEvent[]; sources: SourceItem[]; initialSection?: 'events' | 'library'; onSelectSource: (source: SourceItem) => void; onRequestDelete: (item: WorkItem) => void; onChanged: () => Promise<void>; notify: (message: string) => void; fail: (error: unknown) => void }): ReactNode {
   const [typeFilter, setTypeFilter] = useState('all')
   const [filterOpen, setFilterOpen] = useState(false)
   const [section, setSection] = useState<'events' | 'library'>(initialSection)
   const [expandedEvidence, setExpandedEvidence] = useState<string | null>(null)
+  const [reorganizingSourceId, setReorganizingSourceId] = useState<string | null>(null)
   const filterMenuRef = useRef<HTMLDivElement>(null)
   const types = Array.from(new Set(workItems.map((item) => item.eventType)))
   const filterOptions = [{ value: 'all', label: '全部类型' }, ...types.map((type) => ({ value: type, label: type }))]
@@ -1357,10 +1379,24 @@ function EventsPage({ workItems, events, sources, initialSection = 'events', onS
     document.addEventListener('pointerdown', closeOnOutsideClick)
     return () => document.removeEventListener('pointerdown', closeOnOutsideClick)
   }, [])
+  const reorganizeSource = async (source: SourceItem): Promise<void> => {
+    if (reorganizingSourceId) return
+    setReorganizingSourceId(source.id)
+    try {
+      const result = await window.worklens.reanalyzeSource(source.id)
+      await onChanged()
+      notify(result.message)
+    } catch (error) {
+      fail(error)
+      await onChanged()
+    } finally {
+      setReorganizingSourceId(null)
+    }
+  }
   return (
     <div className="page-stack">
       <section className="events-overview">
-        <div><div className="eyebrow">{section === 'events' ? <Activity size={14} /> : <Library size={14} />}{section === 'events' ? '聚合后的工作事项' : '原始工作资料库'}</div><h2>{section === 'events' ? `${workItems.length} 个可追溯工作事项` : `${sources.length} 份原始工作资料`}</h2><p>{section === 'events' ? '同类工作跨日期合并，卡片始终显示最新进展，并保留全部历史事件与来源。' : '严格按真实上传时间排序；正文识别出的工作日期会单独标注，不改变上传时间。'}</p></div>
+        <div><div className="eyebrow">{section === 'events' ? <Activity size={14} /> : <Library size={14} />}{section === 'events' ? '聚合后的工作事项' : '原始工作资料库'}</div><h2>{section === 'events' ? `${workItems.length} 个可追溯工作事项` : `${sources.length} 份原始工作资料`}</h2><p>{section === 'events' ? '同类工作跨日期合并，卡片始终显示最新进展，并保留全部历史事件与来源。' : '按真实上传时间排序；可重新调用当前 Codex/Cursor 读取全文并更新日期和工作事项。'}</p></div>
         <div className="events-overview-actions">
           <div className="events-view-switch" aria-label="工作内容视图"><button className={section === 'events' ? 'active' : ''} onClick={() => setSection('events')}><BriefcaseBusiness size={14} />工作事项</button><button className={section === 'library' ? 'active' : ''} onClick={() => setSection('library')}><Library size={14} />工作资料库</button></div>
           {section === 'events' && workItems.length > 0 && <div className={`events-filter-menu ${filterOpen ? 'open' : ''}`} ref={filterMenuRef}>
@@ -1392,7 +1428,7 @@ function EventsPage({ workItems, events, sources, initialSection = 'events', onS
           </article>
         })}
       </div> : <EmptyState large icon={<BriefcaseBusiness size={34} />} title="还没有合并后的工作事项" text="生成第一份日报后，关键进展、会议、交付、问题和决策会显示在这里。" />)}
-      {section === 'library' && (sourceLibrary.length ? <section className="source-library panel"><div className="source-library-head"><span>资料名称</span><span>类型</span><span>上传时间</span><span>状态</span></div>{sourceLibrary.map((source) => { const uploaded = formatTimestamp(source.createdAt).split(' '); return <button className="source-library-row" key={source.id} onClick={() => onSelectSource(source)}><div><div className={`file-kind ${source.kind}`}><FileText size={15} /></div><span><strong>{source.title}</strong><small>{source.workDates.length ? `涉及工作日：${formatWorkDateRange(source.workDates)}` : source.excerpt || '尚未识别出明确工作日期'}</small></span></div><span className="source-library-kind">{source.kind.toUpperCase()}</span><time>{uploaded[0]}<small>{uploaded[1] ?? ''}</small></time><StatusPill status={source.status} /><ChevronRight size={15} /></button>})}</section> : <EmptyState large icon={<Library size={34} />} title="工作资料库还是空的" text="通过每日记录或批量上传添加资料后，可以在这里按日期回看原始内容。" />)}
+      {section === 'library' && (sourceLibrary.length ? <section className="source-library panel"><div className="source-library-head"><div><span>资料名称</span><span>类型</span><span>上传时间</span><span>状态</span><span /></div><span>操作</span></div>{sourceLibrary.map((source) => { const uploaded = formatTimestamp(source.createdAt).split(' '); const reorganizing = reorganizingSourceId === source.id; return <article className="source-library-row" key={source.id}><button className="source-library-open" onClick={() => onSelectSource(source)}><div><div className={`file-kind ${source.kind}`}><FileText size={15} /></div><span><strong>{source.title}</strong><small>{source.workDates.length ? `涉及工作日：${formatWorkDateRange(source.workDates)}` : source.excerpt || '等待识别工作日期'}</small></span></div><span className="source-library-kind">{source.kind.toUpperCase()}</span><time>{uploaded[0]}<small>{uploaded[1] ?? ''}</small></time><StatusPill status={source.status} /><ChevronRight size={15} /></button><button className="source-reanalyze-button" aria-label={`重新整理：${source.title}`} disabled={Boolean(reorganizingSourceId)} onClick={() => void reorganizeSource(source)}>{reorganizing ? <LoaderCircle className="spin" size={13} /> : <RefreshCw size={13} />}<span>{reorganizing ? '整理中' : '重新整理'}</span></button></article>})}</section> : <EmptyState large icon={<Library size={34} />} title="工作资料库还是空的" text="通过每日记录或批量上传添加资料后，可以在这里按日期回看原始内容。" />)}
     </div>
   )
 }
@@ -1486,7 +1522,17 @@ function ExportPage({ snapshot, notify, fail }: { snapshot: AppSnapshot; notify:
 }
 
 function SettingsPage({ notify, fail }: { notify: (message: string) => void; fail: (error: unknown) => void }): ReactNode {
-  const [settings, setSettings] = useState<ProviderSettings>({ kind: 'cursor_cli', model: 'auto', baseUrl: '', hasApiKey: false, sendImages: false, autoAnalyze: true })
+  const [settings, setSettings] = useState<ProviderSettings>({
+    kind: 'cursor_cli',
+    model: 'auto',
+    baseUrl: '',
+    hasApiKey: false,
+    sendImages: false,
+    autoAnalyze: true,
+    connected: false,
+    connectedAt: null,
+    connectionMessage: '未连接 AI'
+  })
   const [cliStatus, setCliStatus] = useState<CursorCliStatus | null>(null)
   const [codexStatus, setCodexStatus] = useState<CodexCliStatus | null>(null)
   const [apiKey, setApiKey] = useState('')
@@ -1496,16 +1542,8 @@ function SettingsPage({ notify, fail }: { notify: (message: string) => void; fai
   useEffect(() => {
     void (async () => {
       try {
-        const [saved, status, nextCodexStatus] = await Promise.all([
-          window.worklens.getProviderSettings(),
-          window.worklens.getCursorCliStatus(),
-          window.worklens.getCodexCliStatus()
-        ])
+        const saved = await window.worklens.getProviderSettings()
         setSettings(saved)
-        setCliStatus(status)
-        setCodexStatus(nextCodexStatus)
-        if (saved.kind === 'cursor_cli' && status.authenticated) setModels(await window.worklens.listCursorCliModels())
-        if (saved.kind === 'codex_cli' && nextCodexStatus.authenticated) setModels(await window.worklens.listCodexCliModels())
       } catch (error) {
         fail(error)
       }
@@ -1516,9 +1554,10 @@ function SettingsPage({ notify, fail }: { notify: (message: string) => void; fai
     setBusy(true)
     try {
       const input: SaveProviderSettings = { kind: settings.kind, model: settings.model, baseUrl: settings.baseUrl, apiKey: apiKey || undefined, sendImages: settings.sendImages, autoAnalyze: settings.autoAnalyze }
-      setSettings(await window.worklens.saveProviderSettings(input))
+      const saved = await window.worklens.saveProviderSettings(input)
+      setSettings(saved)
       setApiKey('')
-      notify('AI 设置已安全保存')
+      notify(saved.connected ? 'AI 设置已保存，连接保持有效' : 'AI 设置已保存，请连接 AI 后再整理')
     } catch (error) {
       fail(error)
     } finally {
@@ -1531,14 +1570,14 @@ function SettingsPage({ notify, fail }: { notify: (message: string) => void; fai
       if (settings.kind === 'cursor_cli') {
         const available = await window.worklens.listCursorCliModels()
         setModels(available)
-        if (!available.some((model) => model.id === settings.model)) setSettings((value) => ({ ...value, model: available[0]?.id ?? 'auto' }))
+        if (!available.some((model) => model.id === settings.model)) setSettings((value) => ({ ...value, model: available[0]?.id ?? 'auto', connected: false, connectedAt: null, connectionMessage: '模型已修改，请重新连接' }))
         notify(`读取到 ${available.length} 个可用模型`)
         return
       }
       if (settings.kind === 'codex_cli') {
         const available = await window.worklens.listCodexCliModels()
         setModels(available)
-        if (!available.some((model) => model.id === settings.model)) setSettings((value) => ({ ...value, model: available[0]?.id ?? 'auto' }))
+        if (!available.some((model) => model.id === settings.model)) setSettings((value) => ({ ...value, model: available[0]?.id ?? 'auto', connected: false, connectedAt: null, connectionMessage: '模型已修改，请重新连接' }))
         notify(`读取到 ${available.length} 个可用模型`)
         return
       }
@@ -1549,7 +1588,7 @@ function SettingsPage({ notify, fail }: { notify: (message: string) => void; fai
       if (settings.kind === 'cursor') {
         const available = await window.worklens.listCursorModels()
         setModels(available)
-        if (!settings.model && available[0]) setSettings((value) => ({ ...value, model: available[0]!.id }))
+        if (!settings.model && available[0]) setSettings((value) => ({ ...value, model: available[0]!.id, connected: false, connectedAt: null, connectionMessage: '模型已修改，请重新连接' }))
         notify(`读取到 ${available.length} 个可用模型`)
       }
     } catch (error) {
@@ -1573,13 +1612,14 @@ function SettingsPage({ notify, fail }: { notify: (message: string) => void; fai
   const loginCli = async (): Promise<void> => {
     setBusy(true)
     try {
+      await window.worklens.saveProviderSettings({ kind: 'cursor_cli', model: settings.model || 'auto', baseUrl: '', sendImages: settings.sendImages, autoAnalyze: settings.autoAnalyze })
       const status = await window.worklens.loginCursorCli()
       setCliStatus(status)
       if (!status.authenticated) throw new Error(status.message)
       const available = await window.worklens.listCursorCliModels()
       setModels(available)
-      setSettings((value) => ({ ...value, kind: 'cursor_cli', model: available.some((model) => model.id === value.model) ? value.model : 'auto' }))
-      notify('Cursor 账号登录成功')
+      setSettings(await window.worklens.getProviderSettings())
+      notify('Cursor 账号已连接，后续启动会保持此连接')
     } catch (error) {
       fail(error)
     } finally {
@@ -1601,13 +1641,14 @@ function SettingsPage({ notify, fail }: { notify: (message: string) => void; fai
   const loginCodex = async (): Promise<void> => {
     setBusy(true)
     try {
+      await window.worklens.saveProviderSettings({ kind: 'codex_cli', model: settings.model || 'auto', baseUrl: '', sendImages: settings.sendImages, autoAnalyze: settings.autoAnalyze })
       const status = await window.worklens.loginCodexCli()
       setCodexStatus(status)
       if (!status.authenticated) throw new Error(status.message)
       const available = await window.worklens.listCodexCliModels()
       setModels(available)
-      setSettings((value) => ({ ...value, kind: 'codex_cli', model: available.some((model) => model.id === value.model) ? value.model : 'auto' }))
-      notify('Codex 账号登录成功')
+      setSettings(await window.worklens.getProviderSettings())
+      notify('Codex 账号已连接，后续启动会保持此连接')
     } catch (error) {
       fail(error)
     } finally {
@@ -1617,9 +1658,41 @@ function SettingsPage({ notify, fail }: { notify: (message: string) => void; fai
   const test = async (): Promise<void> => {
     setBusy(true)
     try {
+      const saved = await window.worklens.saveProviderSettings({
+        kind: settings.kind,
+        model: settings.model,
+        baseUrl: settings.baseUrl,
+        apiKey: apiKey || undefined,
+        sendImages: settings.sendImages,
+        autoAnalyze: settings.autoAnalyze
+      })
+      setSettings(saved)
+      setApiKey('')
+      if (saved.kind === 'cursor_cli') {
+        let status = await window.worklens.getCursorCliStatus()
+        setCliStatus(status)
+        if (!status.installed) throw new Error(status.message || '尚未安装 Cursor Agent CLI')
+        if (!status.authenticated) {
+          status = await window.worklens.loginCursorCli()
+          setCliStatus(status)
+        }
+        if (!status.authenticated) throw new Error(status.message || 'Cursor 尚未登录')
+      }
+      if (saved.kind === 'codex_cli') {
+        let status = await window.worklens.getCodexCliStatus()
+        setCodexStatus(status)
+        if (!status.installed) throw new Error(status.message || '尚未安装 Codex CLI')
+        if (!status.authenticated) {
+          status = await window.worklens.loginCodexCli()
+          setCodexStatus(status)
+        }
+        if (!status.authenticated) throw new Error(status.message || 'Codex 尚未登录')
+      }
       const result = await window.worklens.testProvider()
+      setSettings(await window.worklens.getProviderSettings())
       notify(result.message)
     } catch (error) {
+      setSettings(await window.worklens.getProviderSettings().catch(() => settings))
       fail(error)
     } finally {
       setBusy(false)
@@ -1627,39 +1700,67 @@ function SettingsPage({ notify, fail }: { notify: (message: string) => void; fai
   }
 
   const isLocalProvider = settings.kind === 'cursor_cli' || settings.kind === 'codex_cli'
-  const activeLocalStatus = settings.kind === 'codex_cli' ? codexStatus : cliStatus
+  const providerLabel = settings.kind === 'cursor_cli'
+    ? '本机 Cursor'
+    : settings.kind === 'codex_cli'
+      ? '本机 Codex'
+      : settings.kind === 'cursor'
+        ? 'Cursor API'
+        : '外部 API'
+  const selectProvider = (kind: ProviderSettings['kind']): void => {
+    if (settings.kind === kind) return
+    setModels([])
+    setApiKey('')
+    setCliStatus(null)
+    setCodexStatus(null)
+    setSettings((value) => ({
+      ...value,
+      kind,
+      model: kind === 'cursor_cli' || kind === 'codex_cli' ? 'auto' : '',
+      baseUrl: kind === 'openai_compatible' ? value.baseUrl : '',
+      hasApiKey: false,
+      connected: false,
+      connectedAt: null,
+      connectionMessage: '尚未保存并连接此接口'
+    }))
+  }
 
   return (
     <div className="settings-layout">
       <section className="settings-panel panel">
         <div className="settings-heading"><div className="settings-icon"><Bot size={22} /></div><div><h2>日报生成与资料问答模型</h2><p>可连接本机已登录的 Cursor 或 Codex，无需在 WorkLens 中保存 API Key。</p></div></div>
         <div className="provider-tabs">
-          <button className={settings.kind === 'cursor_cli' ? 'active' : ''} onClick={() => { setModels([]); setSettings((value) => ({ ...value, kind: 'cursor_cli', model: 'auto', baseUrl: '' })) }}><Terminal size={16} />本机 Cursor</button>
-          <button className={settings.kind === 'codex_cli' ? 'active' : ''} onClick={() => { setModels([]); setSettings((value) => ({ ...value, kind: 'codex_cli', model: 'auto', baseUrl: '' })) }}><Bot size={16} />本机 Codex</button>
-          <button className={settings.kind === 'cursor' ? 'active' : ''} onClick={() => { setModels([]); setSettings((value) => ({ ...value, kind: 'cursor', model: '', baseUrl: '' })) }}><Sparkles size={16} />Cursor API</button>
-          <button className={settings.kind === 'openai_compatible' ? 'active' : ''} onClick={() => { setModels([]); setSettings((value) => ({ ...value, kind: 'openai_compatible', model: '' })) }}><Network size={16} />外部 API</button>
+          <button className={settings.kind === 'cursor_cli' ? 'active' : ''} onClick={() => selectProvider('cursor_cli')}><Terminal size={16} />本机 Cursor</button>
+          <button className={settings.kind === 'codex_cli' ? 'active' : ''} onClick={() => selectProvider('codex_cli')}><Bot size={16} />本机 Codex</button>
+          <button className={settings.kind === 'cursor' ? 'active' : ''} onClick={() => selectProvider('cursor')}><Sparkles size={16} />Cursor API</button>
+          <button className={settings.kind === 'openai_compatible' ? 'active' : ''} onClick={() => selectProvider('openai_compatible')}><Network size={16} />外部 API</button>
+        </div>
+        <div className={`provider-connection-state ${settings.connected ? 'connected' : ''}`} role="status">
+          <span className="provider-connection-dot" />
+          <div><strong>{providerLabel}{settings.connected ? ' 已连接' : ' 未连接'}</strong><small>{settings.connectionMessage}{settings.connectedAt ? ` · ${formatTimestamp(settings.connectedAt)}` : ''}</small></div>
+          <span>{settings.connected ? '连接会持续保留' : '未连接时不会整理资料'}</span>
         </div>
         <div className="settings-form">
           {settings.kind === 'cursor_cli' && (
-            <div className={`cli-status-card ${cliStatus?.authenticated ? 'connected' : ''}`}>
-              <div className="cli-status-icon">{cliStatus?.authenticated ? <CheckCircle2 size={20} /> : <Terminal size={20} />}</div>
-              <div><strong>{cliStatus?.authenticated ? 'Cursor 账号已连接' : cliStatus?.installed ? 'Cursor CLI 等待登录' : '尚未安装 Cursor Agent CLI'}</strong><span>{cliStatus?.message ?? '正在检测本机 Cursor CLI…'}</span>{cliStatus?.version && <small>版本 {cliStatus.version}</small>}</div>
-              {cliStatus?.installed && !cliStatus.authenticated ? <button className="secondary-button" disabled={busy} onClick={() => void loginCli()}><LogIn size={15} />登录 Cursor</button> : <button className="ghost-button" disabled={busy} onClick={() => void refreshCliStatus()}>刷新状态</button>}
+            <div className={`cli-status-card ${settings.connected || cliStatus?.authenticated ? 'connected' : ''}`}>
+              <div className="cli-status-icon">{settings.connected || cliStatus?.authenticated ? <CheckCircle2 size={20} /> : <Terminal size={20} />}</div>
+              <div><strong>{settings.connected ? 'Cursor 连接已保留' : cliStatus?.authenticated ? 'Cursor 账号可用' : cliStatus?.installed ? 'Cursor CLI 等待登录' : cliStatus ? '尚未安装 Cursor Agent CLI' : '尚未检测本机 Cursor'}</strong><span>{cliStatus?.message ?? (settings.connected ? '无需每次进入设置重新连接' : '仅在点击检查或连接时访问本机 Cursor')}</span>{cliStatus?.version && <small>版本 {cliStatus.version}</small>}</div>
+              {cliStatus?.installed && !cliStatus.authenticated ? <button className="secondary-button" disabled={busy} onClick={() => void loginCli()}><LogIn size={15} />登录 Cursor</button> : <button className="ghost-button" disabled={busy} onClick={() => void refreshCliStatus()}>检查状态</button>}
             </div>
           )}
           {settings.kind === 'codex_cli' && (
-            <div className={`cli-status-card ${codexStatus?.authenticated ? 'connected' : ''}`}>
-              <div className="cli-status-icon">{codexStatus?.authenticated ? <CheckCircle2 size={20} /> : <Bot size={20} />}</div>
-              <div><strong>{codexStatus?.authenticated ? 'Codex 账号已连接' : codexStatus?.installed ? 'Codex CLI 等待登录' : '尚未安装 Codex CLI'}</strong><span>{codexStatus?.message ?? '正在检测本机 Codex CLI…'}</span>{codexStatus?.accountLabel && <small>{codexStatus.accountLabel}</small>}{codexStatus?.version && <small>版本 {codexStatus.version}</small>}</div>
-              {codexStatus?.installed && !codexStatus.authenticated ? <button className="secondary-button" disabled={busy} onClick={() => void loginCodex()}><LogIn size={15} />登录 Codex</button> : <button className="ghost-button" disabled={busy} onClick={() => void refreshCodexStatus()}>刷新状态</button>}
+            <div className={`cli-status-card ${settings.connected || codexStatus?.authenticated ? 'connected' : ''}`}>
+              <div className="cli-status-icon">{settings.connected || codexStatus?.authenticated ? <CheckCircle2 size={20} /> : <Bot size={20} />}</div>
+              <div><strong>{settings.connected ? 'Codex 连接已保留' : codexStatus?.authenticated ? 'Codex 账号可用' : codexStatus?.installed ? 'Codex CLI 等待登录' : codexStatus ? '尚未安装 Codex CLI' : '尚未检测本机 Codex'}</strong><span>{codexStatus?.message ?? (settings.connected ? '无需每次进入设置重新连接' : '仅在点击检查或连接时访问本机 Codex')}</span>{codexStatus?.accountLabel && <small>{codexStatus.accountLabel}</small>}{codexStatus?.version && <small>版本 {codexStatus.version}</small>}</div>
+              {codexStatus?.installed && !codexStatus.authenticated ? <button className="secondary-button" disabled={busy} onClick={() => void loginCodex()}><LogIn size={15} />登录 Codex</button> : <button className="ghost-button" disabled={busy} onClick={() => void refreshCodexStatus()}>检查状态</button>}
             </div>
           )}
-          {settings.kind === 'openai_compatible' && <label>Base URL<input value={settings.baseUrl} onChange={(event) => setSettings((value) => ({ ...value, baseUrl: event.target.value }))} placeholder="https://api.example.com/v1" /><small>必须使用 HTTPS；只有 localhost 可以使用 HTTP。</small></label>}
-          {!isLocalProvider && <label>API Key<div className="input-with-status"><input type="password" value={apiKey} onChange={(event) => setApiKey(event.target.value)} placeholder={settings.hasApiKey ? '已安全保存，留空表示不修改' : '粘贴 API Key'} autoComplete="off" />{settings.hasApiKey && <CheckCircle2 size={17} />}</div><small>密钥由 macOS Keychain 加密，不进入业务数据库和导出包。</small></label>}
-          <label>模型<div className="model-row">{models.length && (settings.kind === 'cursor' || isLocalProvider) ? <select value={settings.model} onChange={(event) => setSettings((value) => ({ ...value, model: event.target.value }))}><option value="">选择模型</option>{models.map((model) => <option key={model.id} value={model.id}>{model.name}</option>)}</select> : <input value={settings.model} onChange={(event) => setSettings((value) => ({ ...value, model: event.target.value }))} placeholder={settings.kind === 'cursor' || isLocalProvider ? '点击刷新模型' : '模型 ID'} />}{(settings.kind === 'cursor' || isLocalProvider) && <button className="secondary-button" disabled={busy} onClick={() => void loadModels()}>刷新模型</button>}</div></label>
+          {settings.kind === 'openai_compatible' && <label>Base URL<input value={settings.baseUrl} onChange={(event) => setSettings((value) => ({ ...value, baseUrl: event.target.value, connected: false, connectedAt: null, connectionMessage: '接口地址已修改，请重新连接' }))} placeholder="https://api.example.com/v1" /><small>必须使用 HTTPS；只有 localhost 可以使用 HTTP。</small></label>}
+          {!isLocalProvider && <label>API Key<div className="input-with-status"><input type="password" value={apiKey} onChange={(event) => { setApiKey(event.target.value); setSettings((value) => ({ ...value, connected: false, connectedAt: null, connectionMessage: '密钥已修改，请重新连接' })) }} placeholder={settings.hasApiKey ? '已安全保存，留空表示不修改' : '粘贴 API Key'} autoComplete="off" />{settings.hasApiKey && <CheckCircle2 size={17} />}</div><small>密钥由 macOS Keychain 加密，不进入业务数据库和导出包。</small></label>}
+          <label>模型<div className="model-row">{models.length && (settings.kind === 'cursor' || isLocalProvider) ? <select value={settings.model} onChange={(event) => setSettings((value) => ({ ...value, model: event.target.value, connected: false, connectedAt: null, connectionMessage: '模型已修改，请重新连接' }))}><option value="">选择模型</option>{models.map((model) => <option key={model.id} value={model.id}>{model.name}</option>)}</select> : <input value={settings.model} onChange={(event) => setSettings((value) => ({ ...value, model: event.target.value, connected: false, connectedAt: null, connectionMessage: '模型已修改，请重新连接' }))} placeholder={settings.kind === 'cursor' || isLocalProvider ? '点击刷新模型' : '模型 ID'} />}{(settings.kind === 'cursor' || isLocalProvider) && <button className="secondary-button" disabled={busy} onClick={() => void loadModels()}>刷新模型</button>}</div></label>
           <label className="check-row muted"><input type="checkbox" checked={settings.autoAnalyze} onChange={(event) => setSettings((value) => ({ ...value, autoAnalyze: event.target.checked }))} /><span><strong>记录或上传后自动生成日报</strong><small>同一天的内容会重新合并，并更新次日早会逐字稿。</small></span></label>
         </div>
-        <div className="settings-actions"><button className="ghost-button" disabled={busy || (isLocalProvider ? !activeLocalStatus?.authenticated : !settings.hasApiKey)} onClick={() => void test()}>测试连接</button><button className="primary-button" disabled={busy || !settings.model} onClick={() => void save()}>{busy ? <LoaderCircle size={16} className="spin" /> : <Check size={16} />}保存设置</button></div>
+        <div className="settings-actions"><button className="ghost-button" disabled={busy || !settings.model || (!isLocalProvider && !apiKey && !settings.hasApiKey)} onClick={() => void test()}>{settings.connected ? '重新连接' : '连接 AI'}</button><button className="primary-button" disabled={busy || !settings.model} onClick={() => void save()}>{busy ? <LoaderCircle size={16} className="spin" /> : <Check size={16} />}保存设置</button></div>
       </section>
       <aside className="privacy-panel"><ShieldCheck size={26} /><h3>本地保存，按需调用 AI</h3><p>原始资料、日报、时间线和搜索索引默认留在本机。生成日报时，当天文本会发送给当前选择的模型。</p><ul><li><Check size={14} />原始记录永不被 AI 覆盖</li><li><Check size={14} />同一天资料统一合并去重</li><li><Check size={14} />AI 在独立进程和临时目录中运行</li><li><Check size={14} />API Key 不进入导出文件</li></ul></aside>
     </div>

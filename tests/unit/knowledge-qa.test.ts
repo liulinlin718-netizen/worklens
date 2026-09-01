@@ -81,7 +81,10 @@ describe('local work knowledge Q&A', () => {
       model: 'gpt-5.6-terra',
       baseUrl: '',
       sendImages: false,
-      autoAnalyze: true
+      autoAnalyze: true,
+      connected: true,
+      connectedAt: '2026-08-25T08:00:00.000Z',
+      connectionMessage: '连接正常'
     })
     let runtimeRequest: Parameters<AiRuntime['answerKnowledgeQuestion']>[1] | null = null
     let runtimeKind = ''

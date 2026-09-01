@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { _electron as electron, expect, test } from '@playwright/test'
@@ -6,6 +6,7 @@ import { _electron as electron, expect, test } from '@playwright/test'
 test('uses the authenticated Cursor CLI and automatically analyzes new content', async () => {
   const directory = mkdtempSync(join(tmpdir(), 'worklens-cursor-cli-e2e-'))
   const fakeAgentPath = join(directory, 'agent')
+  const invocationLogPath = join(directory, 'agent-invocations.log')
   const analysis = {
     sourceDate: {
       value: '2026-07-16',
@@ -44,6 +45,7 @@ test('uses the authenticated Cursor CLI and automatically analyzes new content',
     `#!${process.execPath}
 const fs = require('node:fs')
 const args = process.argv.slice(2)
+fs.appendFileSync(${JSON.stringify(invocationLogPath)}, JSON.stringify(args) + '\\n')
 if (args.includes('--version')) {
   console.log('2026.07.09-test')
 } else if (args[0] === 'status') {
@@ -54,7 +56,35 @@ if (args.includes('--version')) {
   console.log('Logged in')
 } else if (args.includes('-p')) {
   const prompt = args[args.length - 1] || ''
-  if (prompt.includes('历史工作问答助手')) {
+  if (prompt.includes('WorkLens AI 连接校验')) {
+    const quote = '完成 WorkLens AI 连接校验，并确认可以读取本次验证正文。'
+    console.log(JSON.stringify({
+      type: 'result',
+      subtype: 'success',
+      is_error: false,
+      result: JSON.stringify({
+        sourceDate: null,
+        events: [{
+          title: '完成 WorkLens AI 连接校验',
+          workItemKey: 'worklens-ai-check',
+          workItemTitle: 'WorkLens AI 连接校验',
+          eventType: '验证',
+          eventDate: '2026-08-30',
+          datePrecision: 'day',
+          summary: quote,
+          confidence: 1,
+          evidence: [{ quote, blockIndex: null }]
+        }],
+        dailyBriefs: [],
+        summary: { title: '连接校验', content: quote, highlights: [quote] },
+        standup: {
+          title: '连接校验', overview: quote, completed: [quote], inProgress: [],
+          blockers: [], nextSteps: [], script: quote
+        }
+      }),
+      session_id: 'connection-probe'
+    }))
+  } else if (prompt.includes('历史工作问答助手')) {
     const knowledge = fs.readFileSync('knowledge.txt', 'utf8')
     const ref = knowledge.match(/【REF (source:[^】]+)】/)?.[1] || ''
     console.log(JSON.stringify({
@@ -109,6 +139,7 @@ if (args.includes('--version')) {
         sendImages: false,
         autoAnalyze: true
       })
+      await window.worklens.testProvider()
       const source = await window.worklens.captureText({
         title: '体验评审',
         text: '2026年7月16日完成 Agent 体验评审。',
@@ -141,6 +172,15 @@ if (args.includes('--version')) {
     await page.getByRole('button', { name: '向本机 AI 提问' }).click()
     await expect(page.getByText('你完成了 Agent 体验评审，并记录了评审结果。')).toBeVisible()
     await expect(page.getByRole('button', { name: /体验评审/ })).toBeVisible()
+
+    const invocationsBeforeOpeningSettings = readFileSync(invocationLogPath, 'utf8')
+    await page.getByRole('button', { name: 'AI 设置' }).click()
+    await expect(page.locator('.provider-connection-state')).toContainText('本机 Cursor 已连接')
+    await expect(page.locator('.provider-connection-state')).toContainText('连接会持续保留')
+    await page.getByRole('button', { name: '工作看板' }).click()
+    await page.getByRole('button', { name: 'AI 设置' }).click()
+    await expect(page.locator('.provider-connection-state')).toContainText('本机 Cursor 已连接')
+    expect(readFileSync(invocationLogPath, 'utf8')).toBe(invocationsBeforeOpeningSettings)
   } finally {
     await electronApp.close()
     rmSync(directory, { recursive: true, force: true })

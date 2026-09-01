@@ -5,7 +5,8 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { _electron as electron, expect, test } from '@playwright/test'
 
-test('splits a multi-day upload into timeline events and one traceable work item', async () => {
+test('keeps every dated update, including multiple events on the same day', async () => {
+  let analysisRequestCount = 0
   const server = createServer((request, response) => {
     response.setHeader('Content-Type', 'application/json')
     if (request.method === 'GET' && request.url === '/v1/models') {
@@ -13,6 +14,7 @@ test('splits a multi-day upload into timeline events and one traceable work item
       return
     }
     if (request.method === 'POST' && request.url === '/v1/chat/completions') {
+      analysisRequestCount += 1
       response.end(
         JSON.stringify({
           id: 'stub-run-1',
@@ -43,6 +45,17 @@ test('splits a multi-day upload into timeline events and one traceable work item
                       summary: '记忆方案进入验证，并开始补充失败重试入口。',
                       confidence: 0.91,
                       evidence: [{ quote: '开始验证记忆方案，需要增加失败重试入口', blockIndex: 1 }]
+                    },
+                    {
+                      title: '补充记忆回放验收清单',
+                      workItemKey: 'agent-memory-plan',
+                      workItemTitle: '游戏 Agent 记忆方案',
+                      eventType: '验证',
+                      eventDate: '2026-07-16',
+                      datePrecision: 'day',
+                      summary: '补充记忆回放的验收清单。',
+                      confidence: 0.9,
+                      evidence: [{ quote: '补充记忆回放验收清单', blockIndex: 2 }]
                     }
                   ],
                   dailyBriefs: [
@@ -58,7 +71,7 @@ test('splits a multi-day upload into timeline events and one traceable work item
                       workDate: '2026-07-16',
                       title: '记忆方案验证早会汇报',
                       overview: '记忆方案进入验证。',
-                      completed: [], inProgress: ['验证记忆方案'], blockers: [], nextSteps: ['补充失败重试入口'],
+                      completed: [], inProgress: ['验证记忆方案', '补充记忆回放验收清单'], blockers: [], nextSteps: ['补充失败重试入口'],
                       script: '大家早上好，记忆方案已经进入验证。今天补充失败重试入口，目前没有明显阻塞。'
                     }
                   ],
@@ -112,7 +125,7 @@ test('splits a multi-day upload into timeline events and one traceable work item
       if (!connection.ok) throw new Error(connection.message)
       const source = await window.worklens.captureText({
         title: 'Agent 记忆评审',
-        text: '7.15：完成游戏 Agent 记忆方案评审。\n7.16：开始验证记忆方案，需要增加失败重试入口。',
+        text: '7.15：完成游戏 Agent 记忆方案评审。\n7.16：开始验证记忆方案，需要增加失败重试入口。\n补充记忆回放验收清单。',
         businessDate: null
       })
       return source.id
@@ -130,11 +143,13 @@ test('splits a multi-day upload into timeline events and one traceable work item
     expect(finalSnapshot.events).toEqual(
       expect.arrayContaining([
         expect.objectContaining({ title: '游戏 Agent 记忆方案完成评审', eventDate: '2026-07-15' }),
-        expect.objectContaining({ title: '游戏 Agent 记忆方案进入验证', eventDate: '2026-07-16' })
+        expect.objectContaining({ title: '游戏 Agent 记忆方案进入验证', eventDate: '2026-07-16' }),
+        expect.objectContaining({ title: '补充记忆回放验收清单', eventDate: '2026-07-16' })
       ])
     )
+    expect(finalSnapshot.events.filter((event) => event.eventDate === '2026-07-16')).toHaveLength(2)
     expect(finalSnapshot.workItems).toEqual([
-      expect.objectContaining({ title: '游戏 Agent 记忆方案', eventCount: 2, latestDate: '2026-07-16' })
+      expect.objectContaining({ title: '游戏 Agent 记忆方案', eventCount: 3, latestDate: '2026-07-16' })
     ])
     expect(finalSnapshot.sources[0]).toMatchObject({ businessDate: null, workDates: ['2026-07-15', '2026-07-16'] })
     expect(finalSnapshot.dailyBriefs).toEqual(
@@ -166,6 +181,21 @@ test('splits a multi-day upload into timeline events and one traceable work item
     const editedBrief = (await page.evaluate(() => window.worklens.getSnapshot())).dailyBriefs[0]!
     expect(editedBrief.script).toContain('继续完善失败重试入口')
     expect(editedBrief.images).toHaveLength(1)
+
+    const requestsBeforeReanalysis = analysisRequestCount
+    await page.getByRole('button', { name: '工作事项', exact: true }).click()
+    await page.getByRole('button', { name: '工作资料库', exact: true }).click()
+    const sourceLibraryRow = page.locator('.source-library-row').filter({ hasText: 'Agent 记忆评审' })
+    await expect(sourceLibraryRow).toContainText('2026-07-15 — 2026-07-16')
+    await sourceLibraryRow.getByRole('button', { name: '重新整理：Agent 记忆评审' }).click()
+    await expect(page.getByText(/“Agent 记忆评审”已重新整理，识别 2 个工作日/)).toBeVisible()
+    expect(analysisRequestCount).toBe(requestsBeforeReanalysis + 1)
+    const reanalyzedSnapshot = await page.evaluate(() => window.worklens.getSnapshot())
+    const reanalyzedSource = reanalyzedSnapshot.sources[0]!
+    expect(reanalyzedSource).toMatchObject({ status: 'ready', workDates: ['2026-07-15', '2026-07-16'] })
+    expect(reanalyzedSnapshot.workItems).toEqual([
+      expect.objectContaining({ title: '游戏 Agent 记忆方案', eventCount: 3, latestDate: '2026-07-16' })
+    ])
 
     await page.getByRole('button', { name: '工作时间线' }).click()
     const contentScrollbar = await page.locator('main.content').evaluate((content) => {
@@ -247,7 +277,7 @@ test('splits a multi-day upload into timeline events and one traceable work item
     expect(Math.abs(markerAfterWheel.top - timelineGeometry.markerTop)).toBeLessThan(2)
     expect(markerAfterWheel.scrollTop).toBe(0)
     const timelineCards = page.locator('.timeline-card-trigger')
-    await expect(timelineCards).toHaveCount(2)
+    await expect(timelineCards).toHaveCount(3)
     await timelineCards.first().click()
     await expect(page.locator('.timeline-card-detail')).toHaveCount(1)
     await expect(page.getByText('相关原文：')).toBeVisible()
@@ -271,15 +301,15 @@ test('splits a multi-day upload into timeline events and one traceable work item
     expect(timelineActionAlignment.detailRightOffset).toBeLessThanOrEqual(2)
 
     const timelineDeleteButtons = page.getByRole('button', { name: /删除时间线内容：/ })
-    await expect(timelineDeleteButtons).toHaveCount(2)
+    await expect(timelineDeleteButtons).toHaveCount(3)
     await timelineDeleteButtons.first().click()
     const timelineDeleteDialog = page.getByRole('alertdialog')
     await expect(timelineDeleteDialog).toContainText('原始资料和日报不会被删除')
     await expect(page.getByRole('button', { name: '取消' })).toBeFocused()
     await page.getByRole('button', { name: '确认删除' }).click()
-    await expect(page.locator('.timeline-card-trigger')).toHaveCount(1)
+    await expect(page.locator('.timeline-card-trigger')).toHaveCount(2)
     const afterTimelineDelete = await page.evaluate(() => window.worklens.getSnapshot())
-    expect(afterTimelineDelete.events).toHaveLength(1)
+    expect(afterTimelineDelete.events).toHaveLength(2)
     expect(afterTimelineDelete.sources).toHaveLength(1)
     expect(afterTimelineDelete.dailyBriefs).toHaveLength(2)
 
@@ -288,12 +318,12 @@ test('splits a multi-day upload into timeline events and one traceable work item
     await expect(evidenceButtons).toHaveCount(1)
     await evidenceButtons.first().click()
     await expect(page.locator('.work-item-expanded')).toHaveCount(1)
-    await expect(page.locator('.work-item-history > article')).toHaveCount(1)
+    await expect(page.locator('.work-item-history > article')).toHaveCount(2)
     await expect(page.locator('.work-item-sources > button')).toHaveCount(1)
 
     await page.getByRole('button', { name: /删除工作事项：/ }).click()
     const workItemDeleteDialog = page.getByRole('alertdialog')
-    await expect(workItemDeleteDialog).toContainText('1 条历史工作内容')
+    await expect(workItemDeleteDialog).toContainText('2 条历史工作内容')
     await page.getByRole('button', { name: '确认删除' }).click()
     await expect(page.locator('.work-item-card')).toHaveCount(0)
     const afterWorkItemDelete = await page.evaluate(() => window.worklens.getSnapshot())

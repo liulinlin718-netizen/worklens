@@ -1572,7 +1572,7 @@ button:disabled {
 .timeline-history-index {
   position: fixed;
   z-index: 10;
-  width: 32px;
+  width: 24px;
   visibility: hidden;
 }
 
@@ -1586,16 +1586,16 @@ button:disabled {
   flex-direction: column;
   justify-content: safe center;
   height: 100%;
-  padding: 4px 2px;
-  overflow: hidden;
+  padding: 4px 0;
+  overflow: visible;
 }
 
 .timeline-history-markers > button {
   position: relative;
   display: flex;
-  width: 30px;
-  min-height: 24px;
-  flex: 0 0 24px;
+  width: 22px;
+  min-height: 18px;
+  flex: 0 0 18px;
   align-items: center;
   justify-content: flex-start;
   padding: 0;
@@ -2531,9 +2531,9 @@ button.timeline-card:hover {
 .source-library-head,
 .source-library-row {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 80px 105px 85px 16px;
+  grid-template-columns: minmax(0, 1fr) 86px;
   align-items: center;
-  gap: 12px;
+  gap: 10px;
 }
 
 .source-library-head {
@@ -2544,19 +2544,29 @@ button.timeline-card:hover {
   font-size: 7px;
 }
 
-.source-library-head span:first-child {
+.source-library-head > div,
+.source-library-open {
+  display: grid;
+  min-width: 0;
+  grid-template-columns: minmax(0, 1fr) 80px 105px 85px 16px;
+  align-items: center;
+  gap: 12px;
+}
+
+.source-library-head > div > span:first-child {
   padding-left: 40px;
+}
+
+.source-library-head > span:last-child {
+  text-align: center;
 }
 
 .source-library-row {
   width: 100%;
   padding: 11px 16px;
-  border: 0;
   border-bottom: 1px solid #eeeae3;
   color: inherit;
   background: white;
-  cursor: pointer;
-  text-align: left;
   transition: background 120ms ease;
 }
 
@@ -2565,15 +2575,26 @@ button.timeline-card:hover {
 }
 
 .source-library-row:hover,
-.source-library-row:focus-visible {
+.source-library-row:focus-within {
   background: #faf9ff;
 }
 
-.source-library-row:focus-visible {
-  outline-offset: -2px;
+.source-library-open {
+  width: 100%;
+  padding: 0;
+  border: 0;
+  color: inherit;
+  background: transparent;
+  cursor: pointer;
+  text-align: left;
 }
 
-.source-library-row > div:first-child {
+.source-library-open:focus-visible {
+  border-radius: 8px;
+  outline-offset: 4px;
+}
+
+.source-library-open > div:first-child {
   display: grid;
   min-width: 0;
   grid-template-columns: 31px minmax(0, 1fr);
@@ -2605,9 +2626,38 @@ button.timeline-card:hover {
   font-weight: 650;
 }
 
-.source-library-row time {
+.source-library-open time {
   color: #6c6e75;
   font-size: 8px;
+}
+
+.source-reanalyze-button {
+  display: inline-flex;
+  height: 28px;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  padding: 0 8px;
+  border: 1px solid #dcd6ef;
+  border-radius: 8px;
+  color: #5f54bc;
+  background: #f8f6ff;
+  cursor: pointer;
+  font-size: 7px;
+  font-weight: 700;
+  white-space: nowrap;
+  transition: border-color 120ms ease, background 120ms ease, transform 120ms ease;
+}
+
+.source-reanalyze-button:hover:not(:disabled) {
+  border-color: #bdb3eb;
+  background: #f0edff;
+  transform: translateY(-1px);
+}
+
+.source-reanalyze-button:disabled {
+  cursor: wait;
+  opacity: 0.58;
 }
 
 .entity-footer {
@@ -3152,6 +3202,59 @@ button.timeline-card:hover {
   background: white;
   box-shadow: 0 2px 8px rgba(47, 42, 33, 0.08);
   font-weight: 700;
+}
+
+.provider-connection-state {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 9px;
+  margin: -7px 0 15px;
+  padding: 10px 12px;
+  border: 1px solid rgba(191, 101, 92, 0.2);
+  border-radius: 10px;
+  color: #7c5b57;
+  background: #fff8f6;
+}
+
+.provider-connection-state.connected {
+  border-color: rgba(78, 156, 133, 0.24);
+  color: #4f7468;
+  background: #f1f8f5;
+}
+
+.provider-connection-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #cf756b;
+  box-shadow: 0 0 0 4px rgba(207, 117, 107, 0.1);
+}
+
+.provider-connection-state.connected .provider-connection-dot {
+  background: var(--green);
+  box-shadow: 0 0 0 4px rgba(78, 156, 133, 0.1);
+}
+
+.provider-connection-state strong,
+.provider-connection-state small {
+  display: block;
+}
+
+.provider-connection-state strong {
+  font-size: 9px;
+}
+
+.provider-connection-state small,
+.provider-connection-state > span:last-child {
+  margin-top: 2px;
+  color: #96938e;
+  font-size: 7px;
+}
+
+.provider-connection-state > span:last-child {
+  margin: 0;
+  white-space: nowrap;
 }
 
 .settings-form {

@@ -1,7 +1,8 @@
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { DatabaseSync } from 'node:sqlite'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { WorkLensDatabase } from '@core/storage/database'
 import type { AnalysisResult } from '@shared/contracts'
 
@@ -62,6 +63,65 @@ describe('WorkLensDatabase', () => {
     expect(database.search('记忆')).toEqual(
       expect.arrayContaining([expect.objectContaining({ entityId: source.id, entityType: 'source' })])
     )
+  })
+
+  it('recovers interrupted analysis jobs and sources when the database reopens', () => {
+    const filePath = join(directory, 'test.sqlite')
+    const interrupted = database.createSource({
+      title: '中断的整理资料',
+      kind: 'text',
+      rawText: '已有内容需要重新整理。',
+      businessDate: '2026-08-30',
+      datePrecision: 'day',
+      dateOrigin: 'manual',
+      contentHash: 'interrupted-analysis-source'
+    })
+    const secondary = database.createSource({
+      title: '同批次的第二份资料',
+      kind: 'text',
+      rawText: '这份资料也进入了同一次整理。',
+      businessDate: '2026-08-30',
+      datePrecision: 'day',
+      dateOrigin: 'manual',
+      contentHash: 'interrupted-secondary-source'
+    })
+    const untouched = database.createSource({
+      title: '已完成资料',
+      kind: 'text',
+      rawText: '此前已经整理完成。',
+      businessDate: '2026-08-29',
+      datePrecision: 'day',
+      dateOrigin: 'manual',
+      contentHash: 'finished-analysis-source',
+      status: 'ready'
+    })
+    database.setSourceStatus(interrupted.id, 'processing')
+    database.setSourceStatus(secondary.id, 'processing')
+    const interruptedJobId = database.createJob(interrupted.id, 'daily_synthesis', '正在整理')
+    const interruptedRunId = database.createAiRun(interrupted.id, 'test', 'test-model')
+
+    database.close()
+    database = new WorkLensDatabase(filePath)
+
+    expect(database.getSource(interrupted.id)).toMatchObject({ status: 'ready', error: null })
+    expect(database.getSource(secondary.id)).toMatchObject({ status: 'ready', error: null })
+    expect(database.getSource(untouched.id).status).toBe('ready')
+
+    const inspection = new DatabaseSync(filePath, { readOnly: true })
+    try {
+      expect(inspection.prepare('SELECT status, message, error FROM jobs WHERE id = ?').get(interruptedJobId)).toMatchObject({
+        status: 'failed',
+        message: '上次整理因应用退出而中断，可重新整理',
+        error: '任务在完成前被中断'
+      })
+      expect(inspection.prepare('SELECT status, error, finished_at FROM ai_runs WHERE id = ?').get(interruptedRunId)).toMatchObject({
+        status: 'error',
+        error: '任务在完成前被中断',
+        finished_at: expect.any(String)
+      })
+    } finally {
+      inspection.close()
+    }
   })
 
   it('moves a source to a manually corrected date and locks later inference', () => {
@@ -297,7 +357,7 @@ describe('WorkLensDatabase', () => {
     })
   })
 
-  it('keeps dated event history, aggregates one latest work item, and preserves remaining sources on deletion', () => {
+  it('keeps distinct same-day history, aggregates one work item, and preserves remaining sources on deletion', () => {
     const first = database.createSource({
       title: '6 月 15 日登录页记录',
       kind: 'text',
@@ -354,15 +414,15 @@ describe('WorkLensDatabase', () => {
     ]), 'test', 'test-model', '2026-06-15')
 
     const snapshot = database.getSnapshot()
-    expect(snapshot.events).toHaveLength(2)
-    expect(snapshot.events.find((event) => event.eventDate === '2026-06-15')?.evidence).toHaveLength(2)
+    expect(snapshot.events).toHaveLength(3)
+    expect(snapshot.events.filter((event) => event.eventDate === '2026-06-15')).toHaveLength(2)
     expect(snapshot.workItems).toEqual([expect.objectContaining({
       key: 'loginpageredesign',
       title: '登录页改版',
       firstDate: '2026-06-15',
       latestDate: '2026-06-16',
       summary: '修复登录页测试问题。',
-      eventCount: 2,
+      eventCount: 3,
       sourceItemIds: expect.arrayContaining([first.id, second.id])
     })])
     expect(database.getSource(second.id).workDates).toEqual(['2026-06-15', '2026-06-16'])
@@ -374,6 +434,160 @@ describe('WorkLensDatabase', () => {
     expect(remaining.events[0]?.evidence).toEqual([expect.objectContaining({ sourceItemId: first.id })])
     expect(remaining.workItems[0]).toMatchObject({ latestDate: '2026-06-15', eventCount: 1 })
     expect(remaining.workItems[0]?.sourceItemIds).toEqual([first.id])
+  })
+
+  it('stores multiple distinct updates for one work item on the same day', () => {
+    const source = database.createSource({
+      title: '登录页当日进展',
+      kind: 'text',
+      rawText: '完成登录页视觉改版。\n修复登录页输入框交互问题。',
+      businessDate: '2026-06-15',
+      datePrecision: 'day',
+      dateOrigin: 'manual',
+      contentHash: 'same-day-multiple-events'
+    })
+    database.saveDailySynthesis([source.id], synthesis([
+      {
+        title: '完成登录页视觉改版',
+        workItemKey: 'login-page',
+        workItemTitle: '登录页改版',
+        eventType: '交付',
+        eventDate: '2026-06-15',
+        datePrecision: 'day',
+        summary: '完成视觉改版。',
+        confidence: 0.9,
+        evidence: [{ quote: '完成登录页视觉改版', blockIndex: 0 }]
+      },
+      {
+        title: '修复登录页输入框交互问题',
+        workItemKey: 'login-page',
+        workItemTitle: '登录页改版',
+        eventType: '问题修复',
+        eventDate: '2026-06-15',
+        datePrecision: 'day',
+        summary: '修复输入框交互。',
+        confidence: 0.88,
+        evidence: [{ quote: '修复登录页输入框交互问题', blockIndex: 1 }]
+      }
+    ]), 'test', 'test-model', '2026-06-15')
+
+    expect(database.listEvents().map((event) => event.title)).toEqual([
+      '完成登录页视觉改版',
+      '修复登录页输入框交互问题'
+    ])
+    expect(database.listWorkItems()).toEqual([
+      expect.objectContaining({ key: 'loginpage', eventCount: 2 })
+    ])
+  })
+
+  it('keeps a grounded stable work-item title when the latest event is a fallback sentence', () => {
+    const source = database.createSource({
+      title: 'Skill 多轮评测记录',
+      kind: 'text',
+      rawText: '完成 Game Visual Design Skill 第一轮评测。\n继续看一下测试结果，今天再确认有没有其他情况。',
+      businessDate: null,
+      datePrecision: 'unknown',
+      dateOrigin: 'inferred',
+      contentHash: 'stable-work-item-title'
+    })
+    database.saveDailySynthesis([source.id], synthesis([
+      {
+        title: '完成 Game Visual Design Skill 第一轮评测',
+        workItemKey: 'game-visual-design-skill',
+        workItemTitle: 'Game Visual Design Skill 评测',
+        eventType: '评测',
+        eventDate: '2026-07-15',
+        datePrecision: 'day',
+        summary: '完成第一轮评测。',
+        confidence: 0.93,
+        evidence: [{ quote: '完成 Game Visual Design Skill 第一轮评测', blockIndex: 0 }]
+      },
+      {
+        title: '继续看一下测试结果，今天再确认有没有其他情况',
+        workItemKey: 'game-visual-design-skill',
+        workItemTitle: '继续看一下 Game Visual Design Skill 测试结果，今天再确认有没有其他情况',
+        eventType: '工作',
+        eventDate: '2026-07-16',
+        datePrecision: 'day',
+        summary: '继续复核测试结果。',
+        confidence: 0.64,
+        evidence: [{ quote: '继续看一下测试结果，今天再确认有没有其他情况', blockIndex: 1 }]
+      }
+    ]), 'test', 'test-model', '2026-07-16')
+
+    expect(database.listWorkItems()).toEqual([
+      expect.objectContaining({
+        key: 'gamevisualdesignskill',
+        title: 'Game Visual Design Skill 评测',
+        eventCount: 2
+      })
+    ])
+  })
+
+  it('does not drift a reused work-item title after deleting a non-final history event', () => {
+    const source = database.createSource({
+      title: 'Skill 多阶段记录',
+      kind: 'text',
+      rawText: '定义 Game Visual Design Skill 评测标准。\n完成第二轮测试。\n继续看一下后续情况。',
+      businessDate: null,
+      datePrecision: 'unknown',
+      dateOrigin: 'inferred',
+      contentHash: 'stable-title-after-delete'
+    })
+    database.saveDailySynthesis([source.id], synthesis([
+      {
+        title: '定义 Skill 评测标准',
+        workItemKey: 'game-visual-design-skill',
+        workItemTitle: 'Game Visual Design Skill 评测',
+        eventType: '评测',
+        eventDate: '2026-07-15',
+        datePrecision: 'day',
+        summary: '定义评测标准。',
+        confidence: 0.91,
+        evidence: [{ quote: '定义 Game Visual Design Skill 评测标准', blockIndex: 0 }]
+      },
+      {
+        title: '完成 Skill 第二轮测试',
+        workItemKey: 'game-visual-design-skill',
+        workItemTitle: 'Game Visual Design Skill 评测',
+        eventType: '验证',
+        eventDate: '2026-07-16',
+        datePrecision: 'day',
+        summary: '完成第二轮测试。',
+        confidence: 0.9,
+        evidence: [{ quote: '完成 Game Visual Design Skill 第二轮测试', blockIndex: 1 }]
+      },
+      {
+        title: '继续看一下后续情况',
+        workItemKey: 'game-visual-design-skill',
+        workItemTitle: '继续看一下 Game Visual Design Skill 后续情况',
+        eventType: '工作',
+        eventDate: '2026-07-17',
+        datePrecision: 'day',
+        summary: '继续跟进。',
+        confidence: 0.64,
+        evidence: [{ quote: '继续看一下后续情况', blockIndex: 2 }]
+      }
+    ]), 'test', 'test-model', '2026-07-17')
+
+    expect(database.listWorkItems()[0]?.title).toBe('Game Visual Design Skill 评测')
+    const middleEvent = database.listEvents().find((event) => event.title === '完成 Skill 第二轮测试')!
+    database.deleteWorkEvent(middleEvent.id)
+    expect(database.listWorkItems()[0]).toMatchObject({
+      title: 'Game Visual Design Skill 评测',
+      eventCount: 2
+    })
+  })
+
+  it('reuses the snapshot event list while aggregating work items', () => {
+    const listEvents = vi.spyOn(database, 'listEvents')
+
+    const snapshot = database.getSnapshot()
+
+    expect(listEvents).toHaveBeenCalledTimes(1)
+    expect(snapshot.events).toEqual([])
+    expect(snapshot.workItems).toEqual([])
+    listEvents.mockRestore()
   })
 
   it('deletes one timeline event or an entire aggregated work item without deleting its source', () => {

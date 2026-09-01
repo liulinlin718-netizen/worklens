@@ -54,6 +54,19 @@ test('keeps daily capture separate and archives a mixed-day batch by content dat
       naturalHeight: (image as HTMLImageElement).naturalHeight
     }))).toEqual({ naturalWidth: 1024, naturalHeight: 1024 })
     await expect(window.locator('.quick-entry')).toHaveText(['每日记录', '批量上传'])
+    await window.locator('.quick-entry').filter({ hasText: '每日记录' }).click()
+    await window
+      .getByPlaceholder(/^例如：/)
+      .fill('2026年8月30日完成未连接 AI 拦截验证。')
+    await window.getByRole('button', { name: '保存并自动整理' }).click()
+    await expect(window.getByText('未连接 AI，工作内容已保存但未整理')).toBeVisible()
+    const disconnectedResult = await window.evaluate(async () => {
+      const snapshot = await globalThis.window.worklens.getSnapshot()
+      const source = snapshot.sources[0]!
+      await globalThis.window.worklens.deleteSource(source.id)
+      return { status: source.status, events: snapshot.events.length }
+    })
+    expect(disconnectedResult).toEqual({ status: 'queued', events: 0 })
     await window.evaluate(() =>
       globalThis.window.worklens.saveProviderSettings({
         kind: 'cursor_cli',

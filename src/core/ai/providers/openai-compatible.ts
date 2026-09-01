@@ -8,6 +8,7 @@ import type {
   ProviderConfiguration
 } from '@core/ai/contracts'
 import { ProviderError } from '@core/ai/contracts'
+import { fallbackRefinementInstructions } from '@core/ai/refinement-prompt'
 
 interface OpenAiResponse {
   id?: string
@@ -180,16 +181,19 @@ function extractContent(body: OpenAiResponse): string {
   throw new ProviderError('外部模型响应缺少文本内容', false, 'invalid_response')
 }
 
-function buildPrompt(request: AnalysisRequest): string {
+export function buildPrompt(request: AnalysisRequest): string {
   const existingWorkItems = request.existingWorkItems.length
     ? JSON.stringify(request.existingWorkItems, null, 2)
     : '[]'
-  return `当前日期：${request.referenceDate}
+  return `${fallbackRefinementInstructions(request)}
+当前日期：${request.referenceDate}
 资料标题：${request.title}
 资料分组参考日期：${request.businessDate ?? '未提供'}
+无明确日期时的最终兜底日期：${request.fallbackDate}
 已有工作事项：${existingWorkItems}
 
-资料可能包含多个工作日。识别每段工作记录真正对应的工作日，保留跨日期的全部事件；同一事项同一天去重，跨日期事件使用相同 workItemKey。上传时间、截止日、计划上线日和预约日不能误当成工作记录时间戳。每个事件只带直接相关的短 evidence，不得引用整份跨日原文。不要生成需求清单，不要猜测。
+资料可能包含多个工作日。识别每段工作记录真正对应的工作日，保留跨日期的全部事件；同一事项同一天去重，跨日期事件使用相同 workItemKey。上传时间、截止日、计划上线日和预约日不能误当成工作记录时间戳。每个事件只带直接相关的短 evidence，不得引用整份跨日原文。不要生成需求清单，不要虚构工作事实。
+日期分配是必需步骤：每条实质工作内容都必须生成 event，eventDate 不得为 null。优先使用同一行日期、最近的日期标题或日记分段日期；其次使用资料分组参考日期；正文完全没有时间线索时才使用最终兜底日期。相对日期要结合最近日期标题与当前日期换算。只要资料正文包含工作内容，events 至少返回 1 项。
 
 严格返回以下字段：
 - sourceDate: null 或 { value, precision, confidence, rationale }
@@ -198,7 +202,14 @@ function buildPrompt(request: AnalysisRequest): string {
 - summary: { title, content, highlights }
 - standup: { title, overview, completed, inProgress, blockers, nextSteps, script }
 
-优先复用已有事项的 key；workItemTitle 保持稳定。dailyBriefs 按每个明确工作日分别生成，script 只能包含对应日期。standup.script 要自然、简洁、口语化，包含问候、昨天完成、当前进展、风险/协助、今天计划和收尾；不得机械复述字段名，也不能虚构工作。没有阻塞时明确说“目前没有明显阻塞”。
+标题与事项归并规则：
+- event.title 与 workItemTitle 承担不同职责：event.title 写“明确对象 + 当次动作或结果”，保留本次测试、修复、回归、发布等阶段信息；workItemTitle 是跨日期聚合时显示的稳定事项名，只写“具名 Skill、项目、模块或能力 + 核心主题”。
+- workItemTitle 必须是基于 evidence.quote、紧邻的原文段落标题，或已有事项中已核验名称得到的简短名词短语；其中每个有实际含义的对象或范围都必须能在这些依据中找到。不得杜撰项目名、模块名、目标、结果或影响。缺少明确对象时不要猜测，只使用原文中最具体的可核验名词短语并降低 confidence。
+- 同一个具名 Skill、项目或模块的设计、不同轮次测试、修复、复测和回归属于同一事项：分别保留 event，并复用同一个 workItemKey 和 workItemTitle。不同具名 Skill、项目或模块必须分开，不能因为都出现“Skill、页面、功能、测试、修复、优化、工作”等泛词就合并。
+- 只有明确的具名对象锚点能够证明是同一工作时才复用已有 key；多个已有事项都可能匹配或证据不足时，不得猜测合并，应新建基于原文的简短稳定 key。
+- workItemTitle 不得包含日期、“今天、昨天、本周”等时间词，不得包含“继续、正在、完成、已上线、测试通过、修复中”等当次阶段或状态词，不得照抄完整句子、请求语气或多项工作清单。阶段动作只放在 event.title 和 summary 中。
+
+优先复用有明确具名对象锚点的已有事项 key；dailyBriefs 按分配后的每个工作日分别生成，script 只能包含对应日期。standup.script 要自然、简洁、口语化，包含问候、昨天完成、当前进展、风险/协助、今天计划和收尾；不得机械复述字段名，也不能虚构工作。没有阻塞时明确说“目前没有明显阻塞”。
 
 枚举：
 - precision: day | week | month | quarter | unknown

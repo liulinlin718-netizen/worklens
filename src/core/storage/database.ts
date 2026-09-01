@@ -38,6 +38,9 @@ import {
 
 type Row = Record<string, unknown>
 
+const INTERRUPTED_JOB_MESSAGE = '上次整理因应用退出而中断，可重新整理'
+const INTERRUPTED_JOB_ERROR = '任务在完成前被中断'
+
 export interface CreateSourceRecord {
   title: string
   kind: SourceKind
@@ -378,6 +381,41 @@ export class WorkLensDatabase {
           tokenize = 'unicode61'
         );
       `)
+    }
+
+    this.recoverInterruptedWork()
+  }
+
+  private recoverInterruptedWork(): void {
+    const time = nowIso()
+    this.db.exec('BEGIN IMMEDIATE')
+    try {
+      // No analysis worker survives an application restart. Keeping existing
+      // synthesized data while returning the source to ready makes an
+      // interrupted source immediately retryable instead of leaving it stuck
+      // as "processing" forever. This also covers secondary sources included
+      // in a multi-source synthesis because jobs only store the primary source.
+      this.db
+        .prepare("UPDATE source_items SET status = 'ready', error = NULL, updated_at = ? WHERE status = 'processing'")
+        .run(time)
+      this.db
+        .prepare(`
+          UPDATE jobs
+          SET status = 'failed', message = ?, error = ?, updated_at = ?
+          WHERE status = 'running'
+        `)
+        .run(INTERRUPTED_JOB_MESSAGE, INTERRUPTED_JOB_ERROR, time)
+      this.db
+        .prepare(`
+          UPDATE ai_runs
+          SET status = 'error', error = ?, finished_at = ?
+          WHERE status = 'running'
+        `)
+        .run(INTERRUPTED_JOB_ERROR, time)
+      this.db.exec('COMMIT')
+    } catch (error) {
+      this.db.exec('ROLLBACK')
+      throw error
     }
   }
 
@@ -775,7 +813,7 @@ export class WorkLensDatabase {
   }
 
   listEvents(): WorkEvent[] {
-    const rows = this.db.prepare('SELECT * FROM events ORDER BY event_date DESC, created_at DESC').all() as Row[]
+    const rows = this.db.prepare('SELECT * FROM events ORDER BY event_date DESC, rowid ASC').all() as Row[]
     return rows.map((row) =>
       mapEvent(
         row,
@@ -785,9 +823,9 @@ export class WorkLensDatabase {
     )
   }
 
-  listWorkItems(): WorkItem[] {
+  listWorkItems(events: readonly WorkEvent[] = this.listEvents()): WorkItem[] {
     const groups = new Map<string, WorkEvent[]>()
-    for (const event of this.listEvents()) {
+    for (const event of events) {
       const key = event.workItemKey || deriveWorkItemKey(event.workItemTitle || event.title)
       groups.set(key, [...(groups.get(key) ?? []), event])
     }
@@ -804,7 +842,7 @@ export class WorkLensDatabase {
       return {
         id: key,
         key,
-        title: latest.workItemTitle || latest.title,
+        title: selectStableWorkItemTitle(ordered),
         eventType: latest.eventType,
         firstDate: dated[0] ?? null,
         latestDate: dated.at(-1) ?? null,
@@ -890,7 +928,11 @@ export class WorkLensDatabase {
 
     this.transaction(() => {
       this.removeGeneratedEventContributions(uniqueSourceIds)
+      const representativeEventsByDate = new Map<string, AnalysisResult['events'][number]>()
       for (const event of result.events) {
+        if (event.eventDate && !representativeEventsByDate.has(event.eventDate)) {
+          representativeEventsByDate.set(event.eventDate, event)
+        }
         const payload: Record<string, unknown> = {
           ...event,
           eventDate: event.eventDate,
@@ -904,16 +946,37 @@ export class WorkLensDatabase {
           }
         }
       }
+      // Merging normally preserves one event for every recognized date. Keep a
+      // transactional postcondition as a safety net: a provider/local fallback
+      // date must never disappear from the timeline because of an unexpected
+      // merge collision with pre-existing work-item history.
+      for (const [eventDate, event] of representativeEventsByDate) {
+        if (this.hasSourceEventForDate(uniqueSourceIds, eventDate)) continue
+        const payload: Record<string, unknown> = {
+          ...event,
+          eventDate,
+          datePrecision: 'day'
+        }
+        const eventId = this.insertEventRow(primarySourceId, payload)
+        if (Array.isArray(payload.evidence)) {
+          for (const candidate of payload.evidence) {
+            const evidenceSourceId = this.resolveEvidenceSourceId(uniqueSourceIds, candidate)
+            this.addEvidenceCandidates(evidenceSourceId, 'event', eventId, [candidate])
+          }
+        }
+      }
       const eventDates = Array.from(new Set(result.events.map((event) => event.eventDate).filter((date): date is string => Boolean(date)))).sort()
-      const datedBriefs = result.dailyBriefs.length
-        ? result.dailyBriefs
-        : eventDates.length === 1
-          ? [{ workDate: eventDates[0]!, ...result.standup }]
-          : eventDates.length > 1
-            ? eventDates.map((date) => fallbackStandupForEvents(date, result.events.filter((event) => event.eventDate === date)))
-            : requestedDateIsExplicit
-              ? [{ workDate, ...result.standup }]
-              : []
+      const modelBriefs = new Map(result.dailyBriefs.map((brief) => [brief.workDate, brief]))
+      const datedBriefs = eventDates.length
+        ? eventDates.map((date) =>
+            modelBriefs.get(date)
+            ?? (eventDates.length === 1
+              ? { workDate: date, ...result.standup }
+              : fallbackStandupForEvents(date, result.events.filter((event) => event.eventDate === date)))
+          )
+        : requestedDateIsExplicit
+          ? [{ workDate, ...result.standup }]
+          : []
       for (const brief of datedBriefs) {
         this.saveDailyBriefRow(uniqueSourceIds, brief, provider, model)
         savedBriefDates.push(brief.workDate)
@@ -1306,7 +1369,7 @@ export class WorkLensDatabase {
   getSnapshot(): AppSnapshot {
     const sources = this.listSources()
     const events = this.listEvents()
-    const workItems = this.listWorkItems()
+    const workItems = this.listWorkItems(events)
     const dailyBriefs = this.listDailyBriefs()
     return {
       sources,
@@ -1338,12 +1401,32 @@ export class WorkLensDatabase {
       baseUrl: typeof value.baseUrl === 'string' ? value.baseUrl : '',
       hasApiKey: false,
       sendImages: value.sendImages === true,
-      autoAnalyze: value.autoAnalyze !== false
+      autoAnalyze: value.autoAnalyze !== false,
+      connected: value.connected === true,
+      connectedAt: typeof value.connectedAt === 'string' ? value.connectedAt : null,
+      connectionMessage:
+        typeof value.connectionMessage === 'string' && value.connectionMessage
+          ? value.connectionMessage
+          : '未连接 AI'
     }
   }
 
-  saveProviderSettings(settings: Omit<ProviderSettings, 'hasApiKey'>): void {
-    this.setSetting('provider', settings)
+  saveProviderSettings(
+    settings: Omit<ProviderSettings, 'hasApiKey' | 'connected' | 'connectedAt' | 'connectionMessage'> &
+      Partial<Pick<ProviderSettings, 'connected' | 'connectedAt' | 'connectionMessage'>>
+  ): void {
+    const current = this.getProviderSettings()
+    const sameProvider = current.kind === settings.kind
+    this.setSetting('provider', {
+      ...settings,
+      connected: settings.connected ?? (sameProvider ? current.connected : false),
+      connectedAt: settings.connectedAt === undefined
+        ? (sameProvider ? current.connectedAt : null)
+        : settings.connectedAt,
+      connectionMessage: settings.connectionMessage === undefined
+        ? (sameProvider ? current.connectionMessage : '未连接 AI')
+        : settings.connectionMessage
+    })
   }
 
   createJob(sourceItemId: string, jobType: string, message: string): string {
@@ -1395,8 +1478,8 @@ export class WorkLensDatabase {
     const workItemKey = normalizeEntityKey(String(payload.workItemKey ?? '')) || deriveWorkItemKey(workItemTitle)
     const eventDate = nullableString(payload.eventDate)
     const existing = this.db
-      .prepare('SELECT * FROM events WHERE work_item_key = ? AND COALESCE(event_date, ?) = COALESCE(?, ?) LIMIT 1')
-      .get(workItemKey, eventDate ?? '', eventDate, eventDate ?? '') as Row | undefined
+      .prepare('SELECT * FROM events WHERE work_item_key = ? AND entity_key = ? AND COALESCE(event_date, ?) = COALESCE(?, ?) LIMIT 1')
+      .get(workItemKey, key, eventDate ?? '', eventDate, eventDate ?? '') as Row | undefined
     const summary = String(payload.summary ?? '').trim()
     const time = nowIso()
     if (existing) {
@@ -1427,6 +1510,18 @@ export class WorkLensDatabase {
       return id
     }
 
+    return this.insertEventRow(sourceItemId, payload)
+  }
+
+  private insertEventRow(sourceItemId: string, payload: Record<string, unknown>): string {
+    const title = String(payload.title ?? '').trim()
+    if (!title) throw new Error('事件标题不能为空')
+    const key = normalizeEntityKey(title)
+    const workItemTitle = String(payload.workItemTitle ?? '').trim() || title
+    const workItemKey = normalizeEntityKey(String(payload.workItemKey ?? '')) || deriveWorkItemKey(workItemTitle)
+    const eventDate = nullableString(payload.eventDate)
+    const summary = String(payload.summary ?? '').trim()
+    const time = nowIso()
     const id = newId()
     this.db
       .prepare(`
@@ -1452,6 +1547,23 @@ export class WorkLensDatabase {
       )
     this.upsertSearch('event', id, title, summary)
     return id
+  }
+
+  private hasSourceEventForDate(sourceItemIds: string[], eventDate: string): boolean {
+    if (!sourceItemIds.length) return false
+    const placeholders = sourceItemIds.map(() => '?').join(', ')
+    const row = this.db
+      .prepare(`
+        SELECT 1
+        FROM events e
+        LEFT JOIN evidence_links l
+          ON l.target_type = 'event' AND l.target_id = e.id
+        WHERE e.event_date = ?
+          AND (e.source_item_id IN (${placeholders}) OR l.source_item_id IN (${placeholders}))
+        LIMIT 1
+      `)
+      .get(eventDate, ...sourceItemIds, ...sourceItemIds) as Row | undefined
+    return Boolean(row)
   }
 
   private removeGeneratedEventsForDate(workDate: string): void {
@@ -1823,6 +1935,143 @@ export class WorkLensDatabase {
       throw error
     }
   }
+}
+
+interface WorkItemTitleCandidate {
+  title: string
+  normalized: string
+  eventIds: Set<string>
+  primaryEventIds: Set<string>
+  highConfidenceEventIds: Set<string>
+  maxConfidence: number
+}
+
+/**
+ * Work-item identity is deliberately left to workItemKey. This selector only
+ * stabilizes the label shown for an already-grouped item: a late, low-confidence
+ * local fallback must not replace a shorter title that was repeatedly produced
+ * by grounded, higher-confidence events.
+ */
+function selectStableWorkItemTitle(events: readonly WorkEvent[]): string {
+  const candidates = new Map<string, WorkItemTitleCandidate>()
+  const evidenceText = normalizeEntityKey(
+    events.flatMap((event) => event.evidence.map((item) => item.quote)).join('\n')
+  )
+
+  const addCandidate = (
+    rawTitle: string,
+    event: WorkEvent,
+    kind: 'workItem' | 'event' | 'evidence'
+  ): void => {
+    const title = cleanWorkItemTitleCandidate(rawTitle, kind)
+    const normalized = normalizeEntityKey(title)
+    if (!title || !normalized) return
+    const candidate = candidates.get(normalized) ?? {
+      title,
+      normalized,
+      eventIds: new Set<string>(),
+      primaryEventIds: new Set<string>(),
+      highConfidenceEventIds: new Set<string>(),
+      maxConfidence: 0
+    }
+    // Prefer the more concise display form when punctuation/casing variants
+    // normalize to the same logical candidate.
+    if (title.length < candidate.title.length) candidate.title = title
+    candidate.eventIds.add(event.id)
+    if (kind === 'workItem') candidate.primaryEventIds.add(event.id)
+    if (event.confidence > 0.68) candidate.highConfidenceEventIds.add(event.id)
+    candidate.maxConfidence = Math.max(candidate.maxConfidence, event.confidence)
+    candidates.set(normalized, candidate)
+  }
+
+  for (const event of events) {
+    addCandidate(event.workItemTitle || event.title, event, 'workItem')
+    addCandidate(event.title, event, 'event')
+    for (const evidence of event.evidence.slice(0, 2)) {
+      addCandidate(evidence.quote, event, 'evidence')
+    }
+  }
+
+  const ranked = Array.from(candidates.values()).map((candidate) => ({
+    candidate,
+    support: workItemTitleEvidenceSupport(candidate.normalized, evidenceText),
+    score: scoreWorkItemTitleCandidate(candidate, evidenceText)
+  })).sort((left, right) =>
+    right.score - left.score
+    || right.candidate.primaryEventIds.size - left.candidate.primaryEventIds.size
+    || right.support - left.support
+    || left.candidate.title.length - right.candidate.title.length
+    || left.candidate.normalized.localeCompare(right.candidate.normalized, 'zh-CN')
+  )
+
+  return ranked[0]?.candidate.title
+    ?? cleanWorkItemTitleCandidate(events[0]?.workItemTitle || events[0]?.title || '工作事项', 'workItem')
+    ?? '工作事项'
+}
+
+function cleanWorkItemTitleCandidate(
+  value: string,
+  kind: 'workItem' | 'event' | 'evidence'
+): string {
+  let title = value
+    .normalize('NFKC')
+    .replace(/^[\s“”"'‘’《》【】\[\]()（）]+|[\s“”"'‘’《》【】\[\]()（）]+$/gu, '')
+    .trim()
+  if (kind !== 'workItem') {
+    title = title
+      .replace(/^(?:今天|昨日|昨天|本日|当日)?(?:已|正在|继续|开始|完成了?|推进|跟进|开展|着手|计划|准备|看一下|看看|把)\s*/u, '')
+      .trim()
+  }
+  const firstSentence = title.split(/[。！？；;]/u)[0]?.trim()
+  if (firstSentence) title = firstSentence
+  return title.replace(/^[,，:：、\s]+|[,，:：、\s]+$/gu, '').trim().slice(0, 120)
+}
+
+function scoreWorkItemTitleCandidate(
+  candidate: WorkItemTitleCandidate,
+  evidenceText: string
+): number {
+  const title = candidate.title
+  const length = Array.from(title).length
+  const support = workItemTitleEvidenceSupport(candidate.normalized, evidenceText)
+  let score = 0
+
+  score += candidate.primaryEventIds.size * 20
+  score += candidate.eventIds.size * 8
+  score += Math.max(0, candidate.eventIds.size - 1) * 26
+  score += candidate.highConfidenceEventIds.size * 18
+  score += candidate.maxConfidence * 12
+  score += support >= 0.72 ? 44 : support >= 0.48 ? 28 : support >= 0.3 ? 8 : -55
+
+  if (length >= 4 && length <= 24) score += 20
+  if (length < 3) score -= 30
+  if (length > 28) score -= (length - 28) * 3
+  if (length > 48) score -= 45
+  if (/[。！？?；;]/u.test(title) || (length > 18 && /[,，:：]/u.test(title))) score -= 38
+  if (/^(?:今天|昨日|昨天|明天|已|正在|继续|完成|看一下|看看|把|请|需要|想要|做一个)/u.test(title)) score -= 42
+  if (/(?:今天|昨天|明天|上周|本周|下周|目前|当前|继续推进|进行中|待处理|等待)$/u.test(title)) score -= 28
+  if (!candidate.highConfidenceEventIds.size && candidate.maxConfidence <= 0.68) score -= 30
+
+  return score
+}
+
+function workItemTitleEvidenceSupport(title: string, evidenceText: string): number {
+  if (!title || !evidenceText) return 0
+  if (evidenceText.includes(title)) return 1
+
+  // Proper names, versions and numbers are high-risk invention points. If one
+  // is absent from the exact evidence, the candidate cannot be considered well
+  // grounded even when some generic Chinese characters overlap.
+  const tokens = title.match(/[a-z][a-z0-9_-]{1,}|\d+(?:\.\d+)*/giu) ?? []
+  if (tokens.some((token) => !evidenceText.includes(normalizeEntityKey(token)))) return 0
+
+  const units = new Set<string>()
+  for (let index = 0; index < title.length - 1; index += 1) {
+    units.add(title.slice(index, index + 2))
+  }
+  if (!units.size) return evidenceText.includes(title) ? 1 : 0
+  const matches = Array.from(units).filter((unit) => evidenceText.includes(unit)).length
+  return matches / units.size
 }
 
 function mapSource(row: Row): SourceItem {

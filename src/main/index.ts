@@ -199,9 +199,8 @@ function registerIpcHandlers(): void {
       const input = CaptureTextInputSchema.parse(rawInput)
       const source = await requireIngestion().captureText(input)
       broadcastDataChanged()
-      if (source.businessDate) void scheduleAutomaticAnalysis(source.businessDate, event.sender)
-      else void scheduleAutomaticSourceAnalysis(source.id, event.sender)
-      return source
+      await analyzeSourceImmediatelyIfEnabled(source.id, event.sender)
+      return requireDatabase().getSource(source.id)
     })
   )
 
@@ -256,9 +255,45 @@ function registerIpcHandlers(): void {
     IPC.retryImportSource,
     guard(async (event, rawSourceItemId) => {
       const sourceItemId = z.string().uuid().parse(rawSourceItemId)
+      const source = requireDatabase().getSource(sourceItemId)
+      if (source.rawText.trim() && source.assetCount === 0) {
+        await enqueueSourceAnalysis(sourceItemId, event.sender)
+        return {
+          imported: [requireDatabase().getSource(sourceItemId)],
+          duplicates: [],
+          failed: [],
+          cancelled: false
+        } satisfies ImportResult
+      }
       return runImport(event, (progress, signal) =>
         requireIngestion().retrySource(sourceItemId, progress, signal)
       )
+    })
+  )
+
+  ipcMain.handle(
+    IPC.reanalyzeSource,
+    guard(async (event, rawSourceItemId): Promise<ActionResult> => {
+      const sourceItemId = z.string().uuid().parse(rawSourceItemId)
+      const source = requireDatabase().getSource(sourceItemId)
+      if (!source.rawText.trim()) throw new Error('这份资料没有可重新整理的文字内容')
+      const previousDates = new Set(source.workDates)
+      await enqueueSourceAnalysis(sourceItemId, event.sender)
+      const refreshed = requireDatabase().getSource(sourceItemId)
+      const refreshedDates = new Set(refreshed.workDates)
+      for (const removedDate of previousDates) {
+        if (refreshedDates.has(removedDate)) continue
+        if (requireDatabase().listSourcesForDate(removedDate).length) {
+          await enqueueDailyAnalysis(removedDate, event.sender, true)
+        } else {
+          requireDatabase().clearDailySynthesisForDate(removedDate)
+          broadcastDataChanged()
+        }
+      }
+      const dateSummary = refreshed.workDates.length
+        ? `识别 ${refreshed.workDates.length} 个工作日`
+        : '已使用资料日期完成归档'
+      return { ok: true, message: `“${refreshed.title}”已重新整理，${dateSummary}` }
     })
   )
 
@@ -470,16 +505,38 @@ async function runImport(
       controller.signal
     )
     broadcastDataChanged()
-    const importedDates = new Set(result.imported.flatMap((source) => source.businessDate ? [source.businessDate] : []))
-    for (const workDate of importedDates) {
-      void scheduleAutomaticAnalysis(workDate, event.sender)
-    }
-    for (const source of result.imported.filter((item) => !item.businessDate)) {
-      void scheduleAutomaticSourceAnalysis(source.id, event.sender)
+    const settings = await requireAnalysis().getProviderSettings()
+    if (settings.autoAnalyze) {
+      if (!settings.connected) {
+        result.analysisSkipped = '未连接 AI，资料已保存但未整理'
+      } else {
+        for (const source of result.imported) {
+          if (controller.signal.aborted) {
+            result.cancelled = true
+            break
+          }
+          try {
+            await enqueueSourceAnalysis(source.id, event.sender, controller.signal)
+          } catch (error) {
+            if (controller.signal.aborted) {
+              result.cancelled = true
+              break
+            }
+            result.failed.push({
+              fileName: source.title,
+              error: `资料已保存，但内容理解失败：${error instanceof Error ? error.message : String(error)}`,
+              sourceItemId: source.id
+            })
+          }
+        }
+      }
+      result.imported = result.imported.map((source) => requireDatabase().getSource(source.id))
     }
     const processed = result.imported.length + result.duplicates.length + result.failed.length
     const message = result.cancelled
       ? '导入已取消，已完成的文件已保留'
+      : result.analysisSkipped
+        ? result.analysisSkipped
       : `批量导入完成：新增 ${result.imported.length}，跳过 ${result.duplicates.length}，失败 ${result.failed.length}`
     sendJobProgress(event.sender, '', message, 'import', processed, processed, true)
     return result
@@ -594,6 +651,10 @@ async function scheduleAutomaticAnalysis(
   try {
     const settings = await requireAnalysis().getProviderSettings()
     if (!settings.autoAnalyze) return
+    if (!settings.connected) {
+      sendJobProgress(sender, '', '未连接 AI，已跳过自动整理', 'analysis', undefined, undefined, true)
+      return
+    }
     const timerKey = `date:${workDate}`
     const existingTimer = automaticAnalysisTimers.get(timerKey)
     if (existingTimer) clearTimeout(existingTimer)
@@ -610,26 +671,35 @@ async function scheduleAutomaticAnalysis(
   }
 }
 
-async function scheduleAutomaticSourceAnalysis(
+async function analyzeSourceImmediatelyIfEnabled(
   sourceItemId: string,
   sender: Electron.WebContents
 ): Promise<void> {
   try {
     const settings = await requireAnalysis().getProviderSettings()
     if (!settings.autoAnalyze) return
-    const timerKey = `source:${sourceItemId}`
-    const existingTimer = automaticAnalysisTimers.get(timerKey)
-    if (existingTimer) clearTimeout(existingTimer)
-    automaticAnalysisTimers.set(
-      timerKey,
-      setTimeout(() => {
-        automaticAnalysisTimers.delete(timerKey)
-        if (closing) return
-        void enqueueSourceAnalysis(sourceItemId, sender).catch(() => undefined)
-      }, 600)
-    )
+    if (!settings.connected) {
+      let title = '工作资料'
+      try {
+        title = requireDatabase().getSource(sourceItemId).title
+      } catch {
+        // The source may have been deleted before the progress message is sent.
+      }
+      sendJobProgress(
+        sender,
+        sourceItemId,
+        `${title} · 未连接 AI，资料已保存但未整理`,
+        'analysis',
+        undefined,
+        undefined,
+        true
+      )
+      return
+    }
+    await enqueueSourceAnalysis(sourceItemId, sender)
   } catch {
-    // The source remains available locally and can be retried manually.
+    // The material is already stored locally. The failed status and progress
+    // message let the user retry without losing the uploaded content.
   }
 }
 
@@ -679,7 +749,8 @@ function enqueueDailyAnalysis(
 
 function enqueueSourceAnalysis(
   sourceItemId: string,
-  sender: Electron.WebContents
+  sender: Electron.WebContents,
+  signal?: AbortSignal
 ): Promise<void> {
   const task = analysisQueue.catch(() => undefined).then(async () => {
     let sourceTitle = '跨日期资料'
@@ -692,7 +763,7 @@ function enqueueSourceAnalysis(
     try {
       await requireAnalysis().analyzeSource(sourceItemId, (message) => {
         sendJobProgress(sender, sourceItemId, `${sourceTitle} · ${message}`, 'analysis')
-      })
+      }, signal)
       sendJobProgress(sender, sourceItemId, `${sourceTitle} · 已按工作日期拆分并归档`, 'analysis', undefined, undefined, true)
     } catch (error) {
       sendJobProgress(

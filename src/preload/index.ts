@@ -25,6 +25,7 @@ const api: WorkLensApi = {
   },
   cancelImport: () => ipcRenderer.invoke(IPC.cancelImport),
   retryImportSource: (sourceItemId: string) => ipcRenderer.invoke(IPC.retryImportSource, sourceItemId),
+  reanalyzeSource: (sourceItemId: string) => ipcRenderer.invoke(IPC.reanalyzeSource, sourceItemId),
   deleteSource: (sourceItemId: string) => ipcRenderer.invoke(IPC.deleteSource, sourceItemId),
   deleteWorkEvent: (eventId: string) => ipcRenderer.invoke(IPC.deleteWorkEvent, eventId),
   deleteWorkItem: (workItemKey: string) => ipcRenderer.invoke(IPC.deleteWorkItem, workItemKey),

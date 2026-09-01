@@ -37,6 +37,7 @@ describe.runIf(runLive)('Cursor CLI live smoke', () => {
 - 明天计划：上传会议纪要后检查早会逐字稿
 `,
         businessDate: null,
+        fallbackDate: '2026-07-16',
         referenceDate: '2026-07-16',
         existingWorkItems: []
       })

@@ -8,6 +8,7 @@ export const IPC = {
   importDroppedFiles: 'worklens:import-dropped-files',
   cancelImport: 'worklens:cancel-import',
   retryImportSource: 'worklens:retry-import-source',
+  reanalyzeSource: 'worklens:reanalyze-source',
   deleteSource: 'worklens:delete-source',
   deleteWorkEvent: 'worklens:delete-work-event',
   deleteWorkItem: 'worklens:delete-work-item',

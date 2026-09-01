@@ -43,7 +43,40 @@ describe('daily work synthesis flow', () => {
     let receivedText = ''
     const runtime: AiRuntime = {
       analyze: async (_configuration, request) => {
-        receivedText = request.text
+        if (request.title === 'WorkLens AI 连接校验') {
+          const quote = '完成 WorkLens AI 连接校验，并确认可以读取本次验证正文。'
+          return {
+            provider: 'test-provider',
+            model: 'test-model',
+            externalRunId: 'probe-run',
+            result: {
+              sourceDate: null,
+              events: [{
+                title: '完成 WorkLens AI 连接校验',
+                workItemKey: 'worklens-ai-check',
+                workItemTitle: 'WorkLens AI 连接校验',
+                eventType: '验证',
+                eventDate: request.fallbackDate,
+                datePrecision: 'day',
+                summary: quote,
+                confidence: 1,
+                evidence: [{ quote, blockIndex: null }]
+              }],
+              dailyBriefs: [],
+              summary: { title: '连接校验', content: quote, highlights: [quote] },
+              standup: {
+                title: '连接校验',
+                overview: quote,
+                completed: [quote],
+                inProgress: [],
+                blockers: [],
+                nextSteps: [],
+                script: quote
+              }
+            }
+          }
+        }
+        if (request.mode !== 'fallback_refinement') receivedText = request.text
         return {
           provider: 'test-provider',
           model: 'test-model',
@@ -140,6 +173,7 @@ describe('daily work synthesis flow', () => {
       runtime
     )
 
+    await service.testProvider()
     const brief = await service.analyzeWorkDate('2026-08-24')
 
     expect(receivedText).toContain('上午开发记录')

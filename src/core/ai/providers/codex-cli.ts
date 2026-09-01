@@ -30,7 +30,7 @@ import {
 const MAX_STDOUT_BYTES = 12 * 1024 * 1024
 const MAX_STDERR_BYTES = 1024 * 1024
 const MAX_RESULT_BYTES = 12 * 1024 * 1024
-const CODEX_TIMEOUT_MS = 5 * 60_000
+const CODEX_TIMEOUT_MS = 10 * 60_000
 
 interface CommandResult {
   stdout: string
@@ -65,13 +65,10 @@ export class CodexCliProvider implements GenerationProvider {
     const workspace = await mkdtemp(join(tmpdir(), 'worklens-codex-'))
     const resultPath = join(workspace, 'result.json')
     const schemaPath = join(workspace, 'analysis-schema.json')
-    await Promise.all([
-      writeFile(join(workspace, 'source.txt'), request.text, { encoding: 'utf8', mode: 0o600 }),
-      writeFile(schemaPath, JSON.stringify(z.toJSONSchema(AnalysisResultSchema)), {
-        encoding: 'utf8',
-        mode: 0o600
-      })
-    ])
+    await writeFile(schemaPath, JSON.stringify(z.toJSONSchema(AnalysisResultSchema)), {
+      encoding: 'utf8',
+      mode: 0o600
+    })
     try {
       const command = await runCodexExec(
         commandSpec,
@@ -79,7 +76,8 @@ export class CodexCliProvider implements GenerationProvider {
         schemaPath,
         resultPath,
         this.configuration.model,
-        buildPrompt(request),
+        buildPrompt(request, 'stdin'),
+        request.text,
         signal
       )
       const payload = await readStructuredResult(command, resultPath, 'codex_cli_run_failed')
@@ -110,16 +108,11 @@ export class CodexCliProvider implements GenerationProvider {
     const workspace = await mkdtemp(join(tmpdir(), 'worklens-codex-knowledge-'))
     const resultPath = join(workspace, 'result.json')
     const schemaPath = join(workspace, 'knowledge-schema.json')
-    await Promise.all([
-      writeFile(join(workspace, 'knowledge.txt'), formatKnowledgeContext(request), {
-        encoding: 'utf8',
-        mode: 0o600
-      }),
-      writeFile(schemaPath, JSON.stringify(z.toJSONSchema(KnowledgeAnswerResultSchema)), {
-        encoding: 'utf8',
-        mode: 0o600
-      })
-    ])
+    const knowledgeContext = formatKnowledgeContext(request)
+    await writeFile(schemaPath, JSON.stringify(z.toJSONSchema(KnowledgeAnswerResultSchema)), {
+      encoding: 'utf8',
+      mode: 0o600
+    })
     try {
       const command = await runCodexExec(
         commandSpec,
@@ -127,7 +120,8 @@ export class CodexCliProvider implements GenerationProvider {
         schemaPath,
         resultPath,
         this.configuration.model,
-        buildKnowledgePrompt(request),
+        buildKnowledgePrompt(request, 'stdin'),
+        knowledgeContext,
         signal
       )
       const payload = await readStructuredResult(command, resultPath, 'codex_cli_question_failed')
@@ -363,6 +357,7 @@ function runCodexExec(
   resultPath: string,
   model: string,
   prompt: string,
+  context: string,
   signal?: AbortSignal
 ): Promise<CommandResult> {
   const args = [
@@ -383,7 +378,12 @@ function runCodexExec(
   ]
   if (model && model !== 'auto') args.push('--model', model)
   args.push(prompt)
-  return runCodex(commandSpec, args, { cwd: workspace, timeoutMs: CODEX_TIMEOUT_MS, signal })
+  return runCodex(commandSpec, args, {
+    cwd: workspace,
+    timeoutMs: CODEX_TIMEOUT_MS,
+    signal,
+    stdin: context
+  })
 }
 
 async function requireCodexCommand(): Promise<CodexCommand> {
@@ -460,7 +460,7 @@ function callCodexAppServer(
       resolve(message.result)
     }
 
-    child.stdout.on('data', (chunk: Buffer) => {
+    child.stdout!.on('data', (chunk: Buffer) => {
       stdoutBuffer += chunk.toString('utf8')
       if (Buffer.byteLength(stdoutBuffer) > MAX_STDOUT_BYTES) {
         finishReject(new ProviderError('Codex App Server 输出超过安全限制', false, 'codex_cli_output_limit'))
@@ -477,7 +477,7 @@ function callCodexAppServer(
         }
       }
     })
-    child.stderr.on('data', (chunk: Buffer) => {
+    child.stderr!.on('data', (chunk: Buffer) => {
       stderr = `${stderr}${chunk.toString('utf8')}`.slice(-MAX_STDERR_BYTES)
     })
     child.once('error', (error) => {
@@ -501,7 +501,7 @@ function callCodexAppServer(
 function runCodex(
   commandSpec: CodexCommand,
   args: string[],
-  options: { cwd?: string; timeoutMs: number; signal?: AbortSignal }
+  options: { cwd?: string; timeoutMs: number; signal?: AbortSignal; stdin?: string }
 ): Promise<CommandResult> {
   return new Promise((resolve, reject) => {
     if (options.signal?.aborted) {
@@ -512,9 +512,13 @@ function runCodex(
       cwd: options.cwd,
       env: codexEnvironment(),
       shell: false,
-      stdio: ['ignore', 'pipe', 'pipe'],
+      stdio: [options.stdin === undefined ? 'ignore' : 'pipe', 'pipe', 'pipe'],
       windowsHide: true
     })
+    if (options.stdin !== undefined) {
+      child.stdin?.on('error', () => {})
+      child.stdin?.end(options.stdin)
+    }
     let stdout = ''
     let stderr = ''
     let settled = false
@@ -544,13 +548,13 @@ function runCodex(
     )
 
     options.signal?.addEventListener('abort', abort, { once: true })
-    child.stdout.on('data', (chunk: Buffer) => {
+    child.stdout!.on('data', (chunk: Buffer) => {
       stdout += chunk.toString('utf8')
       if (Buffer.byteLength(stdout) > MAX_STDOUT_BYTES) {
         finishReject(new ProviderError('Codex CLI 输出超过安全限制', false, 'codex_cli_output_limit'))
       }
     })
-    child.stderr.on('data', (chunk: Buffer) => {
+    child.stderr!.on('data', (chunk: Buffer) => {
       stderr += chunk.toString('utf8')
       if (Buffer.byteLength(stderr) > MAX_STDERR_BYTES) {
         finishReject(new ProviderError('Codex CLI 错误输出超过安全限制', false, 'codex_cli_output_limit'))
