@@ -140,6 +140,14 @@ const NAV_ITEMS: Array<{ key: NavKey; label: string; icon: typeof Inbox }> = [
   { key: 'settings', label: 'AI 设置', icon: Settings }
 ]
 
+const IS_MAC_PLATFORM = navigator.platform.toLowerCase().includes('mac')
+const DESKTOP_PLATFORM_CLASS = IS_MAC_PLATFORM
+  ? 'platform-darwin'
+  : navigator.platform.toLowerCase().includes('win')
+    ? 'platform-win32'
+    : 'platform-linux'
+const SHORTCUT_MODIFIER = IS_MAC_PLATFORM ? '⌘' : 'Ctrl+'
+
 export function App(): ReactNode {
   const [activeNav, setActiveNav] = useState<NavKey>('dashboard')
   const [snapshot, setSnapshot] = useState<AppSnapshot>(EMPTY_SNAPSHOT)
@@ -285,7 +293,7 @@ export function App(): ReactNode {
   }
 
   return (
-    <div className="app-shell">
+    <div className={`app-shell ${DESKTOP_PLATFORM_CLASS}`}>
       <aside className="sidebar">
         <div className="window-drag-region" />
         <div className="brand">
@@ -293,7 +301,7 @@ export function App(): ReactNode {
           <div><strong>WorkLens</strong><span>每天工作，清晰汇报</span></div>
         </div>
         <div className="quick-entry-grid">
-          <button className={`quick-entry ${activeNav === 'capture' ? 'active' : ''}`} onClick={() => navigate('capture')} title="每日记录（⌘ N）"><Plus size={16} /><span>每日记录</span></button>
+          <button className={`quick-entry ${activeNav === 'capture' ? 'active' : ''}`} onClick={() => navigate('capture')} title={`每日记录（${SHORTCUT_MODIFIER}N）`}><Plus size={16} /><span>每日记录</span></button>
           <button className={`quick-entry ${activeNav === 'batch' ? 'active' : ''}`} onClick={() => navigate('batch')}><Upload size={16} /><span>批量上传</span></button>
         </div>
         <nav>
@@ -332,7 +340,7 @@ export function App(): ReactNode {
               placeholder="搜索日报、工作事项和原始记录"
               aria-label="全局搜索"
             />
-            <kbd>⌘ K</kbd>
+            <kbd>{SHORTCUT_MODIFIER}K</kbd>
             {searchOpen && searchQuery && (
               <SearchPopover query={searchQuery} results={searchResults} onClose={() => setSearchOpen(false)} onOpen={openSearchResult} />
             )}
@@ -848,7 +856,7 @@ function BatchUploadPage({ snapshot, progress, onSelect, onChanged, openTimeline
               <div className="format-chips"><span>最多 200 项</span><span>单份 25 MB</span></div>
             </section>
             <section className="batch-paste-card">
-              <div><div className="batch-paste-icon"><Clipboard size={17} /></div><div><h3>粘贴复制的工作文字</h3><p>可直接按 ⌘V，粘贴后还能检查和修改</p></div></div>
+              <div><div className="batch-paste-icon"><Clipboard size={17} /></div><div><h3>粘贴复制的工作文字</h3><p>可直接按 {SHORTCUT_MODIFIER}V，粘贴后还能检查和修改</p></div></div>
               <textarea ref={pasteInputRef} value={pasteDraft} onChange={(event) => setPasteDraft(event.target.value)} placeholder={'例如：\n2026年8月25日完成登录页改版，接口权限仍在等待。'} maxLength={500_000} />
               <div className="batch-paste-footer"><span>{pasteDraft.trim().length.toLocaleString()} 字</span><button className="secondary-button" disabled={!pasteDraft.trim() || pendingCount >= MAX_BATCH_ITEMS} onClick={addPastedText}><Plus size={14} />加入待处理</button></div>
             </section>
@@ -1186,48 +1194,63 @@ function AskWorkPage({ snapshot, entries, setEntries, onOpenCitation, fail }: { 
   )
 }
 
-function TimelinePage({ snapshot, onSelect, onRequestDelete }: { snapshot: AppSnapshot; onSelect: (source: SourceItem) => void; onRequestDelete: (event: WorkEvent) => void }): ReactNode {
-  const [expandedItem, setExpandedItem] = useState<string | null>(null)
-  const [activeDate, setActiveDate] = useState<string | null>(null)
-  const [historyPreview, setHistoryPreview] = useState<{
+interface HistoryRailPreviewItem {
+  title: string
+  summary: string
+  eventType: string
+}
+
+interface HistoryRailGroup {
+  date: string
+  count: number
+  itemNoun: string
+  items: HistoryRailPreviewItem[]
+}
+
+function HistoryRail({
+  pageRef,
+  groups,
+  activeDate,
+  navLabel,
+  previewId,
+  onJump
+}: {
+  pageRef: { current: HTMLDivElement | null }
+  groups: HistoryRailGroup[]
+  activeDate: string | null
+  navLabel: string
+  previewId: string
+  onJump: (date: string) => void
+}): ReactNode {
+  const [preview, setPreview] = useState<{
     date: string
     count: number
-    events: Array<Pick<WorkEvent, 'title' | 'summary' | 'eventType'>>
+    itemNoun: string
+    items: HistoryRailPreviewItem[]
     remaining: number
     top: number
     left: number
     width: number
   } | null>(null)
-  const [historyRailBox, setHistoryRailBox] = useState<{ top: number; left: number; height: number } | null>(null)
-  const groupRefs = useRef<Record<string, HTMLElement | null>>({})
-  const timelinePageRef = useRef<HTMLDivElement | null>(null)
-  const historyMarkersRef = useRef<HTMLElement | null>(null)
-  const lastTimelineWheelAt = useRef(0)
-  const pendingTimelineDateRef = useRef<{ date: string; until: number } | null>(null)
-  const groups = useMemo(() => {
-    const map = new Map<string, WorkEvent[]>()
-    for (const event of snapshot.events) {
-      if (!event.eventDate) continue
-      const date = event.eventDate.slice(0, 10)
-      map.set(date, [...(map.get(date) ?? []), event])
-    }
-    return Array.from(map, ([date, events]) => ({ date, events })).sort((a, b) => a.date.localeCompare(b.date))
-  }, [snapshot.events])
-
-  useEffect(() => {
-    if (!groups.length) return
-    setActiveDate((current) => current && groups.some((group) => group.date === current) ? current : groups[0]!.date)
-  }, [groups])
+  const [railBox, setRailBox] = useState<{ top: number; left: number; height: number } | null>(null)
+  const railRef = useRef<HTMLElement | null>(null)
+  const markersRef = useRef<HTMLElement | null>(null)
+  const historyWindowRef = useRef<HTMLDivElement | null>(null)
+  const previousActiveIndexRef = useRef<number | null>(null)
+  const lastWheelAt = useRef(0)
 
   useLayoutEffect(() => {
-    const page = timelinePageRef.current
+    const page = railRef.current?.closest<HTMLDivElement>('.timeline-page') ?? pageRef.current
     const content = page?.closest<HTMLElement>('main.content')
-    if (!page || !content) return
+    const stream = page?.querySelector<HTMLElement>(':scope > .timeline-work-stream')
+    if (!page || !content || !stream) return
     const updateRailBox = (): void => {
-      const pageBox = page.getBoundingClientRect()
       const contentBox = content.getBoundingClientRect()
-      const next = { top: contentBox.top, left: pageBox.left - 12, height: contentBox.height }
-      setHistoryRailBox((current) => current
+      const streamBox = stream.getBoundingClientRect()
+      const railWidth = railRef.current?.getBoundingClientRect().width ?? 24
+      const blankCenter = contentBox.left + Math.max(0, streamBox.left - contentBox.left) / 2
+      const next = { top: contentBox.top, left: blankCenter - railWidth / 2, height: contentBox.height }
+      setRailBox((current) => current
         && Math.abs(current.top - next.top) < 0.5
         && Math.abs(current.left - next.left) < 0.5
         && Math.abs(current.height - next.height) < 0.5
@@ -1238,12 +1261,122 @@ function TimelinePage({ snapshot, onSelect, onRequestDelete }: { snapshot: AppSn
     const observer = new ResizeObserver(updateRailBox)
     observer.observe(content)
     observer.observe(page)
+    observer.observe(stream)
     window.addEventListener('resize', updateRailBox)
     return () => {
       observer.disconnect()
       window.removeEventListener('resize', updateRailBox)
     }
-  }, [groups.length])
+  }, [groups.length, pageRef])
+
+  const jumpToDate = useCallback((date: string): void => {
+    setPreview(null)
+    onJump(date)
+  }, [onJump])
+
+  const handleWheel = useCallback((event: WheelEvent): void => {
+    const delta = Math.abs(event.deltaY) >= Math.abs(event.deltaX) ? event.deltaY : event.deltaX
+    if (Math.abs(delta) < 2) return
+    const now = performance.now()
+    if (now - lastWheelAt.current < 280) {
+      event.preventDefault()
+      return
+    }
+    const currentIndex = Math.max(0, groups.findIndex((group) => group.date === activeDate))
+    const nextIndex = Math.min(groups.length - 1, Math.max(0, currentIndex + (delta > 0 ? 1 : -1)))
+    if (nextIndex === currentIndex) return
+    event.preventDefault()
+    lastWheelAt.current = now
+    jumpToDate(groups[nextIndex]!.date)
+  }, [activeDate, groups, jumpToDate])
+
+  useEffect(() => {
+    const markers = markersRef.current
+    if (!markers) return
+    markers.addEventListener('wheel', handleWheel, { passive: false })
+    return () => markers.removeEventListener('wheel', handleWheel)
+  }, [handleWheel])
+
+  const activeIndex = groups.length ? Math.max(0, groups.findIndex((group) => group.date === activeDate)) : 0
+  useLayoutEffect(() => {
+    const previousIndex = previousActiveIndexRef.current
+    previousActiveIndexRef.current = activeIndex
+    const historyWindowElement = historyWindowRef.current
+    if (!groups.length || previousIndex === null || previousIndex === activeIndex || !historyWindowElement) return
+    if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return
+    historyWindowElement.getAnimations().forEach((animation) => animation.cancel())
+    historyWindowElement.animate(
+      [
+        { opacity: 0.48, transform: `translateY(${activeIndex > previousIndex ? 8 : -8}px)` },
+        { opacity: 1, transform: 'translateY(0)' }
+      ],
+      { duration: 180, easing: 'cubic-bezier(0.22, 1, 0.36, 1)' }
+    )
+  }, [activeIndex, groups.length])
+
+  if (!groups.length) return null
+  const historyWindow = getTimelineHistoryWindow(groups, activeIndex)
+  const showPreview = (target: HTMLButtonElement, group: HistoryRailGroup): void => {
+    const bounds = target.getBoundingClientRect()
+    const left = bounds.right + 16
+    setPreview({
+      date: group.date,
+      count: group.count,
+      itemNoun: group.itemNoun,
+      items: group.items.slice(0, 2),
+      remaining: Math.max(0, group.count - 2),
+      top: (window.innerHeight + 92) / 2,
+      left,
+      width: Math.min(420, Math.max(260, window.innerWidth - left - 24))
+    })
+  }
+
+  return <>
+    <aside ref={railRef} className={`timeline-history-index ${railBox ? 'measured' : ''}`} aria-label="工作日期历史索引" style={railBox ?? undefined}>
+      <nav ref={markersRef} className="timeline-history-markers" aria-label={navLabel}>
+        <div ref={historyWindowRef} className="timeline-history-window">
+          {historyWindow.map(({ item: group, index }) => {
+            const active = activeDate === group.date
+            const distance = Math.abs(index - activeIndex)
+            const tickWidth = active ? 18 : distance === 1 ? 13 : distance === 2 ? 10 : distance === 3 ? 8 : 6
+            const spokenTitles = group.items.slice(0, 2).map((item) => item.title).join('、')
+            const remaining = Math.max(0, group.count - 2)
+            const label = `${friendlyDate(group.date)}，${group.count} ${group.itemNoun}：${spokenTitles}${remaining ? `，另有 ${remaining} 项` : ''}`
+            return <button key={group.date} className={active ? 'active' : ''} aria-label={label} aria-current={active ? 'date' : undefined} aria-describedby={preview?.date === group.date ? previewId : undefined} onMouseDown={(event) => event.preventDefault()} onMouseEnter={(event) => showPreview(event.currentTarget, group)} onMouseLeave={() => setPreview(null)} onFocus={(event) => showPreview(event.currentTarget, group)} onBlur={() => setPreview(null)} onClick={() => jumpToDate(group.date)}><span className="timeline-history-line" style={{ width: tickWidth }} /></button>
+          })}
+        </div>
+      </nav>
+    </aside>
+    {preview && <section id={previewId} className="timeline-history-tooltip" role="tooltip" style={{ top: preview.top, left: preview.left, width: preview.width }}><header><div><strong>{friendlyDate(preview.date)}</strong><small>{preview.count} {preview.itemNoun}</small></div><span>点击刻度跳转</span></header><div className="timeline-history-preview-list">{preview.items.map((item, index) => <article key={`${item.title}:${index}`}><span>{item.eventType}</span><div><strong>{item.title}</strong><p>{item.summary}</p></div></article>)}</div>{preview.remaining > 0 && <footer>还有 {preview.remaining} 项</footer>}</section>}
+  </>
+}
+
+function TimelinePage({ snapshot, onSelect, onRequestDelete }: { snapshot: AppSnapshot; onSelect: (source: SourceItem) => void; onRequestDelete: (event: WorkEvent) => void }): ReactNode {
+  const [expandedItem, setExpandedItem] = useState<string | null>(null)
+  const [activeDate, setActiveDate] = useState<string | null>(null)
+  const groupRefs = useRef<Record<string, HTMLElement | null>>({})
+  const timelinePageRef = useRef<HTMLDivElement | null>(null)
+  const pendingTimelineDateRef = useRef<{ date: string; until: number } | null>(null)
+  const groups = useMemo(() => {
+    const map = new Map<string, WorkEvent[]>()
+    for (const event of snapshot.events) {
+      if (!event.eventDate) continue
+      const date = event.eventDate.slice(0, 10)
+      map.set(date, [...(map.get(date) ?? []), event])
+    }
+    return Array.from(map, ([date, events]) => ({ date, events })).sort((a, b) => a.date.localeCompare(b.date))
+  }, [snapshot.events])
+  const historyGroups = useMemo<HistoryRailGroup[]>(() => groups.map((group) => ({
+    date: group.date,
+    count: group.events.length,
+    itemNoun: '项工作内容',
+    items: group.events.map((event) => ({ title: event.title, summary: event.summary, eventType: event.eventType }))
+  })), [groups])
+
+  useEffect(() => {
+    if (!groups.length) return
+    setActiveDate((current) => current && groups.some((group) => group.date === current) ? current : groups[0]!.date)
+  }, [groups])
 
   useEffect(() => {
     if (!groups.length) return
@@ -1275,66 +1408,15 @@ function TimelinePage({ snapshot, onSelect, onRequestDelete }: { snapshot: AppSn
 
   const jumpToDate = useCallback((date: string): void => {
     setActiveDate(date)
-    setHistoryPreview(null)
     const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches
     pendingTimelineDateRef.current = reducedMotion ? null : { date, until: performance.now() + 800 }
     groupRefs.current[date]?.scrollIntoView({ behavior: reducedMotion ? 'auto' : 'smooth', block: 'start' })
   }, [])
-  const showHistoryPreview = (target: HTMLButtonElement, group: { date: string; events: WorkEvent[] }): void => {
-    const bounds = target.getBoundingClientRect()
-    const left = bounds.right + 16
-    setHistoryPreview({
-      date: group.date,
-      count: group.events.length,
-      events: group.events.slice(0, 2).map((event) => ({ title: event.title, summary: event.summary, eventType: event.eventType })),
-      remaining: Math.max(0, group.events.length - 2),
-      top: (window.innerHeight + 92) / 2,
-      left,
-      width: Math.min(420, Math.max(260, window.innerWidth - left - 24))
-    })
-  }
-  const handleTimelineWheel = useCallback((event: WheelEvent): void => {
-    const delta = Math.abs(event.deltaY) >= Math.abs(event.deltaX) ? event.deltaY : event.deltaX
-    if (Math.abs(delta) < 2) return
-    const now = performance.now()
-    if (now - lastTimelineWheelAt.current < 280) {
-      event.preventDefault()
-      return
-    }
-    const currentIndex = Math.max(0, groups.findIndex((group) => group.date === activeDate))
-    const nextIndex = Math.min(groups.length - 1, Math.max(0, currentIndex + (delta > 0 ? 1 : -1)))
-    if (nextIndex === currentIndex) return
-    event.preventDefault()
-    lastTimelineWheelAt.current = now
-    jumpToDate(groups[nextIndex]!.date)
-  }, [activeDate, groups, jumpToDate])
-
-  useEffect(() => {
-    const markers = historyMarkersRef.current
-    if (!markers) return
-    markers.addEventListener('wheel', handleTimelineWheel, { passive: false })
-    return () => markers.removeEventListener('wheel', handleTimelineWheel)
-  }, [handleTimelineWheel])
 
   if (!groups.length) return <EmptyState large icon={<Clock3 size={34} />} title="时间线等待第一条工作内容" text="日报生成并沉淀工作事项后，会按工作日显示在这里。" />
-  const activeIndex = Math.max(0, groups.findIndex((group) => group.date === activeDate))
-  const historyWindow = getTimelineHistoryWindow(groups, activeIndex)
   return (
     <div ref={timelinePageRef} className="timeline-page">
-      <aside className={`timeline-history-index ${historyRailBox ? 'measured' : ''}`} aria-label="工作日期历史索引" style={historyRailBox ?? undefined}>
-        <nav ref={historyMarkersRef} className="timeline-history-markers" aria-label="工作日期从早到晚排列，可点击或使用鼠标滚轮切换">
-          {historyWindow.map(({ item: group, index }) => {
-            const active = activeDate === group.date
-            const distance = Math.abs(index - activeIndex)
-            const tickWidth = active ? 18 : distance === 1 ? 13 : distance === 2 ? 10 : distance === 3 ? 8 : 6
-            const spokenTitles = group.events.slice(0, 2).map((event) => event.title).join('、')
-            const remaining = Math.max(0, group.events.length - 2)
-            const label = `${friendlyDate(group.date)}，${group.events.length} 项工作内容：${spokenTitles}${remaining ? `，另有 ${remaining} 项` : ''}`
-            return <button key={group.date} className={active ? 'active' : ''} aria-label={label} aria-current={active ? 'date' : undefined} aria-describedby={historyPreview?.date === group.date ? 'timeline-history-preview' : undefined} onMouseDown={(event) => event.preventDefault()} onMouseEnter={(event) => showHistoryPreview(event.currentTarget, group)} onMouseLeave={() => setHistoryPreview(null)} onFocus={(event) => showHistoryPreview(event.currentTarget, group)} onBlur={() => setHistoryPreview(null)} onClick={() => jumpToDate(group.date)}><span className="timeline-history-line" style={{ width: tickWidth }} /></button>
-          })}
-        </nav>
-      </aside>
-      {historyPreview && <section id="timeline-history-preview" className="timeline-history-tooltip" role="tooltip" style={{ top: historyPreview.top, left: historyPreview.left, width: historyPreview.width }}><header><div><strong>{friendlyDate(historyPreview.date)}</strong><small>{historyPreview.count} 项工作内容</small></div><span>点击刻度跳转</span></header><div className="timeline-history-preview-list">{historyPreview.events.map((event, index) => <article key={`${event.title}:${index}`}><span>{event.eventType}</span><div><strong>{event.title}</strong><p>{event.summary}</p></div></article>)}</div>{historyPreview.remaining > 0 && <footer>还有 {historyPreview.remaining} 项工作内容</footer>}</section>}
+      <HistoryRail pageRef={timelinePageRef} groups={historyGroups} activeDate={activeDate} navLabel="工作日期从早到晚排列，可点击或使用鼠标滚轮切换" previewId="timeline-history-preview" onJump={jumpToDate} />
       <div className="timeline-work-stream">
         {groups.map((group) => (
           <section className="timeline-group" data-timeline-date={group.date} key={group.date} ref={(element) => { groupRefs.current[group.date] = element }}>
@@ -1366,11 +1448,31 @@ function EventsPage({ workItems, events, sources, initialSection = 'events', onS
   const [filterOpen, setFilterOpen] = useState(false)
   const [section, setSection] = useState<'events' | 'library'>(initialSection)
   const [expandedEvidence, setExpandedEvidence] = useState<string | null>(null)
+  const [activeWorkItemDate, setActiveWorkItemDate] = useState<string | null>(null)
   const [reorganizingSourceId, setReorganizingSourceId] = useState<string | null>(null)
   const filterMenuRef = useRef<HTMLDivElement>(null)
+  const workItemsPageRef = useRef<HTMLDivElement | null>(null)
+  const workItemGroupRefs = useRef<Record<string, HTMLElement | null>>({})
+  const pendingWorkItemDateRef = useRef<{ date: string; until: number } | null>(null)
   const types = Array.from(new Set(workItems.map((item) => item.eventType)))
   const filterOptions = [{ value: 'all', label: '全部类型' }, ...types.map((type) => ({ value: type, label: type }))]
-  const visible = typeFilter === 'all' ? workItems : workItems.filter((item) => item.eventType === typeFilter)
+  const visible = useMemo(() => typeFilter === 'all' ? workItems : workItems.filter((item) => item.eventType === typeFilter), [typeFilter, workItems])
+  const workItemDateGroups = useMemo(() => {
+    const map = new Map<string, WorkItem[]>()
+    for (const item of visible) {
+      if (!item.latestDate) continue
+      const date = item.latestDate.slice(0, 10)
+      map.set(date, [...(map.get(date) ?? []), item])
+    }
+    return Array.from(map, ([date, items]) => ({ date, items })).sort((left, right) => left.date.localeCompare(right.date))
+  }, [visible])
+  const undatedWorkItems = useMemo(() => visible.filter((item) => !item.latestDate), [visible])
+  const workItemHistoryGroups = useMemo<HistoryRailGroup[]>(() => workItemDateGroups.map((group) => ({
+    date: group.date,
+    count: group.items.length,
+    itemNoun: '个工作事项',
+    items: group.items.map((item) => ({ title: item.title, summary: item.summary, eventType: item.eventType }))
+  })), [workItemDateGroups])
   const sourceLibrary = [...sources].sort((a, b) => b.createdAt.localeCompare(a.createdAt))
   useEffect(() => {
     const closeOnOutsideClick = (event: PointerEvent): void => {
@@ -1378,6 +1480,46 @@ function EventsPage({ workItems, events, sources, initialSection = 'events', onS
     }
     document.addEventListener('pointerdown', closeOnOutsideClick)
     return () => document.removeEventListener('pointerdown', closeOnOutsideClick)
+  }, [])
+  useEffect(() => {
+    if (!workItemDateGroups.length) {
+      setActiveWorkItemDate(null)
+      return
+    }
+    setActiveWorkItemDate((current) => current && workItemDateGroups.some((group) => group.date === current) ? current : workItemDateGroups[0]!.date)
+  }, [workItemDateGroups])
+  useEffect(() => {
+    if (!workItemDateGroups.length || section !== 'events') return
+    const observer = new IntersectionObserver((entries) => {
+      const visibleEntries = entries
+        .filter((entry) => entry.isIntersecting)
+        .sort((left, right) => left.boundingClientRect.top - right.boundingClientRect.top)
+      const pending = pendingWorkItemDateRef.current
+      if (pending) {
+        if (performance.now() >= pending.until) {
+          pendingWorkItemDateRef.current = null
+        } else if (visibleEntries.some((entry) => (entry.target as HTMLElement).dataset.workItemDate === pending.date)) {
+          pendingWorkItemDateRef.current = null
+          setActiveWorkItemDate(pending.date)
+          return
+        } else {
+          return
+        }
+      }
+      const date = (visibleEntries[0]?.target as HTMLElement | undefined)?.dataset.workItemDate
+      if (date) setActiveWorkItemDate(date)
+    }, { rootMargin: '-112px 0px -55% 0px', threshold: [0, 0.05, 0.2] })
+    workItemDateGroups.forEach((group) => {
+      const element = workItemGroupRefs.current[group.date]
+      if (element) observer.observe(element)
+    })
+    return () => observer.disconnect()
+  }, [section, workItemDateGroups])
+  const jumpToWorkItemDate = useCallback((date: string): void => {
+    setActiveWorkItemDate(date)
+    const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches
+    pendingWorkItemDateRef.current = reducedMotion ? null : { date, until: performance.now() + 800 }
+    workItemGroupRefs.current[date]?.scrollIntoView({ behavior: reducedMotion ? 'auto' : 'smooth', block: 'start' })
   }, [])
   const reorganizeSource = async (source: SourceItem): Promise<void> => {
     if (reorganizingSourceId) return
@@ -1392,6 +1534,21 @@ function EventsPage({ workItems, events, sources, initialSection = 'events', onS
     } finally {
       setReorganizingSourceId(null)
     }
+  }
+  const renderWorkItemCard = (item: WorkItem): ReactNode => {
+    const expanded = expandedEvidence === item.id
+    const history = events.filter((event) => item.eventIds.includes(event.id)).sort((a, b) => (b.eventDate ?? b.updatedAt).localeCompare(a.eventDate ?? a.updatedAt))
+    const mergedSources = item.sourceItemIds.map((sourceId) => sources.find((source) => source.id === sourceId)).filter((source): source is SourceItem => Boolean(source))
+    return <article className={`entity-card work-item-card ${expanded ? 'evidence-expanded' : ''}`} key={item.id}>
+      <div className="entity-card-top"><span className="entity-type"><BriefcaseBusiness size={14} />{item.eventType}</span><div className="entity-card-actions"><span>最近更新 {item.latestDate ?? '日期未定'}</span><button className="card-delete-button" aria-label={`删除工作事项：${item.title}`} title="删除这个工作事项" onClick={() => onRequestDelete(item)}><Trash2 size={15} /></button></div></div>
+      <h3>{item.title}</h3><p>{item.summary}</p>
+      <button className="mini-evidence" aria-expanded={expanded} onClick={() => setExpandedEvidence(expanded ? null : item.id)}><span><Timeline size={13} />{item.eventCount} 次进展 · {item.sourceItemIds.length} 份来源</span><ChevronDown size={14} /></button>
+      {expanded && <div className="work-item-expanded">
+        <section><div className="work-item-section-title"><strong>进展时间线</strong><span>{item.firstDate && item.latestDate ? `${item.firstDate} — ${item.latestDate}` : '日期待确认'}</span></div><div className="work-item-history">{history.map((event) => <article key={event.id}><time>{event.eventDate ?? '日期未定'}</time><div><strong>{event.title}</strong><p>{event.summary}</p></div></article>)}</div></section>
+        <section><div className="work-item-section-title"><strong>全部合并来源</strong><span>{item.evidence.length} 条相关证据</span></div><div className="work-item-sources">{mergedSources.map((source) => { const quotes = item.evidence.filter((evidence) => evidence.sourceItemId === source.id); return <button key={source.id} onClick={() => onSelectSource(source)}><div><FileText size={14} /><span><strong>{source.title}</strong><small>上传于 {formatTimestamp(source.createdAt)}</small></span><ChevronRight size={14} /></div>{quotes[0] && <q>{quotes[0].quote}</q>}{quotes.length > 1 && <small>另有 {quotes.length - 1} 条相关证据</small>}</button> })}</div></section>
+      </div>}
+      <div className="entity-footer"><span>可信度 {Math.round(item.confidence * 100)}%</span><span>{item.eventCount} 个日期事件 · {item.sourceItemIds.length} 份资料</span></div>
+    </article>
   }
   return (
     <div className="page-stack">
@@ -1411,23 +1568,13 @@ function EventsPage({ workItems, events, sources, initialSection = 'events', onS
           </div>}
         </div>
       </section>
-      {section === 'events' && (workItems.length ? <div className="card-grid">
-        {visible.map((item) => {
-          const expanded = expandedEvidence === item.id
-          const history = events.filter((event) => item.eventIds.includes(event.id)).sort((a, b) => (b.eventDate ?? b.updatedAt).localeCompare(a.eventDate ?? a.updatedAt))
-          const mergedSources = item.sourceItemIds.map((sourceId) => sources.find((source) => source.id === sourceId)).filter((source): source is SourceItem => Boolean(source))
-          return <article className={`entity-card work-item-card ${expanded ? 'evidence-expanded' : ''}`} key={item.id}>
-            <div className="entity-card-top"><span className="entity-type"><BriefcaseBusiness size={14} />{item.eventType}</span><div className="entity-card-actions"><span>最近更新 {item.latestDate ?? '日期未定'}</span><button className="card-delete-button" aria-label={`删除工作事项：${item.title}`} title="删除这个工作事项" onClick={() => onRequestDelete(item)}><Trash2 size={15} /></button></div></div>
-            <h3>{item.title}</h3><p>{item.summary}</p>
-            <button className="mini-evidence" aria-expanded={expanded} onClick={() => setExpandedEvidence(expanded ? null : item.id)}><span><Timeline size={13} />{item.eventCount} 次进展 · {item.sourceItemIds.length} 份来源</span><ChevronDown size={14} /></button>
-            {expanded && <div className="work-item-expanded">
-              <section><div className="work-item-section-title"><strong>进展时间线</strong><span>{item.firstDate && item.latestDate ? `${item.firstDate} — ${item.latestDate}` : '日期待确认'}</span></div><div className="work-item-history">{history.map((event) => <article key={event.id}><time>{event.eventDate ?? '日期未定'}</time><div><strong>{event.title}</strong><p>{event.summary}</p></div></article>)}</div></section>
-              <section><div className="work-item-section-title"><strong>全部合并来源</strong><span>{item.evidence.length} 条相关证据</span></div><div className="work-item-sources">{mergedSources.map((source) => { const quotes = item.evidence.filter((evidence) => evidence.sourceItemId === source.id); return <button key={source.id} onClick={() => onSelectSource(source)}><div><FileText size={14} /><span><strong>{source.title}</strong><small>上传于 {formatTimestamp(source.createdAt)}</small></span><ChevronRight size={14} /></div>{quotes[0] && <q>{quotes[0].quote}</q>}{quotes.length > 1 && <small>另有 {quotes.length - 1} 条相关证据</small>}</button> })}</div></section>
-            </div>}
-            <div className="entity-footer"><span>可信度 {Math.round(item.confidence * 100)}%</span><span>{item.eventCount} 个日期事件 · {item.sourceItemIds.length} 份资料</span></div>
-          </article>
-        })}
-      </div> : <EmptyState large icon={<BriefcaseBusiness size={34} />} title="还没有合并后的工作事项" text="生成第一份日报后，关键进展、会议、交付、问题和决策会显示在这里。" />)}
+      {section === 'events' && (workItems.length ? visible.length ? <div ref={workItemsPageRef} className="timeline-page work-items-timeline-page">
+        <HistoryRail pageRef={workItemsPageRef} groups={workItemHistoryGroups} activeDate={activeWorkItemDate} navLabel="工作事项按最近更新日期从早到晚排列，可点击或使用鼠标滚轮切换" previewId="work-items-history-preview" onJump={jumpToWorkItemDate} />
+        <div className="timeline-work-stream work-items-by-date">
+          {workItemDateGroups.map((group) => <section className="work-item-date-group" data-work-item-date={group.date} key={group.date} ref={(element) => { workItemGroupRefs.current[group.date] = element }}><div className="work-item-date-heading"><h3>{friendlyDate(group.date)}</h3><span>{group.items.length} 个工作事项最近更新</span></div><div className="card-grid">{group.items.map(renderWorkItemCard)}</div></section>)}
+          {undatedWorkItems.length > 0 && <section className="work-item-date-group"><div className="work-item-date-heading"><h3>日期未定</h3><span>{undatedWorkItems.length} 个工作事项</span></div><div className="card-grid">{undatedWorkItems.map(renderWorkItemCard)}</div></section>}
+        </div>
+      </div> : <EmptyState large icon={<ListFilter size={34} />} title="没有符合筛选条件的工作事项" text="可以切换事项类型，查看其他已整理的工作内容。" /> : <EmptyState large icon={<BriefcaseBusiness size={34} />} title="还没有合并后的工作事项" text="生成第一份日报后，关键进展、会议、交付、问题和决策会显示在这里。" />)}
       {section === 'library' && (sourceLibrary.length ? <section className="source-library panel"><div className="source-library-head"><div><span>资料名称</span><span>类型</span><span>上传时间</span><span>状态</span><span /></div><span>操作</span></div>{sourceLibrary.map((source) => { const uploaded = formatTimestamp(source.createdAt).split(' '); const reorganizing = reorganizingSourceId === source.id; return <article className="source-library-row" key={source.id}><button className="source-library-open" onClick={() => onSelectSource(source)}><div><div className={`file-kind ${source.kind}`}><FileText size={15} /></div><span><strong>{source.title}</strong><small>{source.workDates.length ? `涉及工作日：${formatWorkDateRange(source.workDates)}` : source.excerpt || '等待识别工作日期'}</small></span></div><span className="source-library-kind">{source.kind.toUpperCase()}</span><time>{uploaded[0]}<small>{uploaded[1] ?? ''}</small></time><StatusPill status={source.status} /><ChevronRight size={15} /></button><button className="source-reanalyze-button" aria-label={`重新整理：${source.title}`} disabled={Boolean(reorganizingSourceId)} onClick={() => void reorganizeSource(source)}>{reorganizing ? <LoaderCircle className="spin" size={13} /> : <RefreshCw size={13} />}<span>{reorganizing ? '整理中' : '重新整理'}</span></button></article>})}</section> : <EmptyState large icon={<Library size={34} />} title="工作资料库还是空的" text="通过每日记录或批量上传添加资料后，可以在这里按日期回看原始内容。" />)}
     </div>
   )

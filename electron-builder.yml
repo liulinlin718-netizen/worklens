@@ -24,4 +24,19 @@ mac:
   target:
     - dmg
     - zip
+win:
+  icon: build/icon.ico
+  target:
+    - target: nsis
+      arch:
+        - x64
+nsis:
+  artifactName: ${productName}-Setup-${version}-${arch}.${ext}
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: always
+  createStartMenuShortcut: true
+  shortcutName: WorkLens
+  uninstallDisplayName: WorkLens
+  deleteAppDataOnUninstall: false
 artifactName: ${productName}-${version}-${arch}.${ext}

@@ -264,20 +264,11 @@ export async function loginCodexCli(): Promise<CodexCliStatus> {
 }
 
 export async function resolveCodexCommand(): Promise<CodexCommand | null> {
-  const candidates = [
-    process.env.WORKLENS_CODEX_PATH,
-    join(homedir(), '.local', 'bin', 'codex'),
-    '/opt/homebrew/bin/codex',
-    '/usr/local/bin/codex',
-    ...String(process.env.PATH ?? '')
-      .split(delimiter)
-      .filter(Boolean)
-      .map((directory) => join(directory, 'codex'))
-  ].filter((candidate): candidate is string => Boolean(candidate))
+  const candidates = codexCommandCandidates()
 
   for (const candidate of Array.from(new Set(candidates))) {
     try {
-      await access(candidate, constants.X_OK)
+      await access(candidate, process.platform === 'win32' ? constants.F_OK : constants.X_OK)
       const binaryPath = await realpath(candidate)
       return { binaryPath, label: candidate }
     } catch {
@@ -285,6 +276,61 @@ export async function resolveCodexCommand(): Promise<CodexCommand | null> {
     }
   }
   return null
+}
+
+export function codexCommandCandidates(
+  platform = process.platform,
+  environment: NodeJS.ProcessEnv = process.env,
+  homeDirectory = homedir()
+): string[] {
+  const candidates: Array<string | undefined> = [environment.WORKLENS_CODEX_PATH]
+  if (platform === 'win32') {
+    candidates.push(
+      join(homeDirectory, '.local', 'bin', 'codex.exe'),
+      join(homeDirectory, '.codex', 'bin', 'codex.exe')
+    )
+    if (environment.APPDATA) {
+      candidates.push(
+        join(
+          environment.APPDATA,
+          'npm',
+          'node_modules',
+          '@openai',
+          'codex',
+          'node_modules',
+          '@openai',
+          'codex-win32-x64',
+          'vendor',
+          'x86_64-pc-windows-msvc',
+          'codex',
+          'codex.exe'
+        )
+      )
+    }
+    if (environment.LOCALAPPDATA) {
+      candidates.push(join(environment.LOCALAPPDATA, 'Programs', 'Codex', 'codex.exe'))
+    }
+    candidates.push(
+      ...String(environment.PATH ?? '')
+        .split(delimiter)
+        .filter(Boolean)
+        .map((directory) => join(directory, 'codex.exe'))
+    )
+  } else {
+    candidates.push(
+      join(homeDirectory, '.local', 'bin', 'codex'),
+      '/opt/homebrew/bin/codex',
+      '/usr/local/bin/codex',
+      ...String(environment.PATH ?? '')
+        .split(delimiter)
+        .filter(Boolean)
+        .map((directory) => join(directory, 'codex'))
+    )
+  }
+  return Array.from(new Set(candidates.filter((candidate): candidate is string => {
+    if (!candidate) return false
+    return platform !== 'win32' || candidate.toLowerCase().endsWith('.exe')
+  })))
 }
 
 export function parseCodexModelList(raw: unknown): ModelInfo[] {
@@ -492,7 +538,7 @@ function callCodexAppServer(
       method: 'initialize',
       id: 0,
       params: {
-        clientInfo: { name: 'worklens', title: 'WorkLens', version: '0.1.0' }
+        clientInfo: { name: 'worklens', title: 'WorkLens', version: '0.1.1' }
       }
     })
   })

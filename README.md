@@ -20,7 +20,7 @@ WorkLens 是一个本地优先的每日工作整理器。你可以随手记录�
 
 ## 环境
 
-- macOS 作为首发平台。
+- macOS 13+（Apple Silicon）或 Windows 10/11 x64。
 - Node.js 22.13 或更高；推荐使用 `.nvmrc` 中的当前 LTS。
 - 默认模式需要官方 Cursor Agent CLI：
 
@@ -48,13 +48,15 @@ npm run test:e2e
 npm run package
 ```
 
-`npm run package` 生成未签名的 macOS 目录包；`npm run dist:mac` 生成 DMG/ZIP。正式分发前仍需配置 Apple Developer 签名和公证凭据。
+`npm run package` 生成当前系统的未签名目录包；`npm run dist:mac` 生成 DMG/ZIP，`npm run dist:win` 生成 Windows x64 NSIS 安装程序。版本标签推送到 GitHub 后，Windows 工作流会在原生 Windows 环境运行类型检查、单元测试、打包后启动测试和静默安装测试，再把安装包与 SHA-256 校验文件发布到对应 Release。
+
+Windows 版会使用系统原生标题栏、Segoe UI 字体和 Ctrl 快捷键。Cursor/Codex CLI 连接只解析原生 `.exe`，不会通过 `.cmd`/`.bat` 命令壳传递工作资料；可把官方 CLI 加入 `PATH`，或分别通过 `WORKLENS_CURSOR_AGENT_PATH`、`WORKLENS_CODEX_PATH` 指向原生可执行文件。
 
 ## 数据与隐私
 
 - 工作区默认位于 Electron `userData/workspace`，原始附件按 SHA-256 保存。
 - 单份文件上限为 25 MB；批次取消时已成功完成的资料会保留，未开始的资料不会生成失败记录。
-- 可选 API Provider 的 Key 通过 Electron `safeStorage` 加密；macOS 上使用 Keychain。密钥不进入业务数据库、日志和导出文件。
+- 可选 API Provider 的 Key 通过 Electron `safeStorage` 加密；macOS 上使用 Keychain，Windows 上使用系统 DPAPI。密钥不进入业务数据库、日志和导出文件。
 - Cursor CLI 登录令牌由官方 CLI 自行保存在系统安全存储中，WorkLens 只读取“已登录/未登录”状态。
 - AI 在独立 Electron Utility Process 中运行。CLI 使用 `ask` 只读模式、显式 sandbox，并只信任 WorkLens 自己创建的隔离临时目录。
 - AI 生成的日报不会覆盖原始记录；同一天重新生成时，只替换该日的合并日报和自动生成工作事项。

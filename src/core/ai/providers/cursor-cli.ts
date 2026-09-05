@@ -1,7 +1,7 @@
 import { constants } from 'node:fs'
 import { access, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises'
 import { homedir, tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { delimiter, join } from 'node:path'
 import { spawn } from 'node:child_process'
 import {
   AnalysisResultSchema,
@@ -296,46 +296,11 @@ export async function loginCursorCli(): Promise<CursorCliStatus> {
 }
 
 export async function resolveCursorAgentCommand(): Promise<CursorAgentCommand | null> {
-  const homeCursorPath = join(
-    homedir(),
-    'Applications',
-    'Cursor.app',
-    'Contents',
-    'Resources',
-    'app',
-    'bin',
-    'cursor'
-  )
-  const candidates = [
-    process.env.WORKLENS_CURSOR_AGENT_PATH
-      ? {
-          binaryPath: process.env.WORKLENS_CURSOR_AGENT_PATH,
-          argsPrefix: [],
-          label: process.env.WORKLENS_CURSOR_AGENT_PATH
-        }
-      : null,
-    {
-      binaryPath: join(homedir(), '.local', 'bin', 'agent'),
-      argsPrefix: [],
-      label: join(homedir(), '.local', 'bin', 'agent')
-    },
-    { binaryPath: '/opt/homebrew/bin/agent', argsPrefix: [], label: '/opt/homebrew/bin/agent' },
-    { binaryPath: '/usr/local/bin/agent', argsPrefix: [], label: '/usr/local/bin/agent' },
-    {
-      binaryPath: '/Applications/Cursor.app/Contents/Resources/app/bin/cursor',
-      argsPrefix: ['agent'],
-      label: '/Applications/Cursor.app/Contents/Resources/app/bin/cursor agent'
-    },
-    {
-      binaryPath: homeCursorPath,
-      argsPrefix: ['agent'],
-      label: `${homeCursorPath} agent`
-    }
-  ].filter((candidate): candidate is CursorAgentCommand => Boolean(candidate))
+  const candidates = cursorAgentCommandCandidates()
 
   for (const candidate of candidates) {
     try {
-      await access(candidate.binaryPath, constants.X_OK)
+      await access(candidate.binaryPath, process.platform === 'win32' ? constants.F_OK : constants.X_OK)
       return {
         ...candidate,
         binaryPath: await realpath(candidate.binaryPath)
@@ -345,6 +310,65 @@ export async function resolveCursorAgentCommand(): Promise<CursorAgentCommand | 
     }
   }
   return null
+}
+
+export function cursorAgentCommandCandidates(
+  platform = process.platform,
+  environment: NodeJS.ProcessEnv = process.env,
+  homeDirectory = homedir()
+): CursorAgentCommand[] {
+  const candidates: CursorAgentCommand[] = []
+  const add = (binaryPath: string | undefined, argsPrefix: string[] = []): void => {
+    if (!binaryPath) return
+    // WorkLens never launches .cmd/.bat wrappers because analysis prompts contain
+    // user-authored text. Requiring a native executable avoids cmd.exe expansion.
+    if (platform === 'win32' && !binaryPath.toLowerCase().endsWith('.exe')) return
+    candidates.push({
+      binaryPath,
+      argsPrefix,
+      label: [binaryPath, ...argsPrefix].join(' ')
+    })
+  }
+
+  add(environment.WORKLENS_CURSOR_AGENT_PATH)
+  if (platform === 'win32') {
+    add(join(homeDirectory, '.local', 'bin', 'agent.exe'))
+    add(join(homeDirectory, '.local', 'bin', 'cursor-agent.exe'))
+    if (environment.LOCALAPPDATA) {
+      add(join(environment.LOCALAPPDATA, 'Programs', 'Cursor', 'resources', 'app', 'bin', 'agent.exe'))
+    }
+    for (const directory of String(environment.PATH ?? '').split(delimiter).filter(Boolean)) {
+      add(join(directory, 'agent.exe'))
+      add(join(directory, 'cursor-agent.exe'))
+    }
+  } else {
+    add(join(homeDirectory, '.local', 'bin', 'agent'))
+    add('/opt/homebrew/bin/agent')
+    add('/usr/local/bin/agent')
+    for (const directory of String(environment.PATH ?? '').split(delimiter).filter(Boolean)) {
+      add(join(directory, 'agent'))
+    }
+    if (platform === 'darwin') {
+      const systemCursorPath = '/Applications/Cursor.app/Contents/Resources/app/bin/cursor'
+      const homeCursorPath = join(
+        homeDirectory,
+        'Applications',
+        'Cursor.app',
+        'Contents',
+        'Resources',
+        'app',
+        'bin',
+        'cursor'
+      )
+      add(systemCursorPath, ['agent'])
+      add(homeCursorPath, ['agent'])
+    }
+  }
+
+  return Array.from(new Map(candidates.map((candidate) => [
+    `${candidate.binaryPath}\0${candidate.argsPrefix.join('\0')}`,
+    candidate
+  ])).values())
 }
 
 export function parseModelList(output: string): ModelInfo[] {
@@ -373,7 +397,9 @@ async function requireCursorAgentCommand(): Promise<CursorAgentCommand> {
   const commandSpec = await resolveCursorAgentCommand()
   if (!commandSpec) {
     throw new ProviderError(
-      '未找到 Cursor Agent CLI。请安装官方 agent，或确认 Cursor.app 在 /Applications 中。',
+      process.platform === 'win32'
+        ? '未找到 Cursor Agent CLI。请安装官方 Windows Agent CLI（agent.exe），再返回刷新状态。'
+        : '未找到 Cursor Agent CLI。请安装官方 agent，或确认 Cursor.app 在 /Applications 中。',
       false,
       'cursor_cli_not_installed'
     )

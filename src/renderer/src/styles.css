@@ -2,7 +2,7 @@
   color: #20232d;
   background: #f3f1eb;
   font-family:
-    Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "SF Pro Display",
+    Inter, ui-sans-serif, "Segoe UI Variable", "Segoe UI", -apple-system, BlinkMacSystemFont, "SF Pro Display",
     "PingFang SC", "Microsoft YaHei", sans-serif;
   font-synthesis: none;
   text-rendering: optimizeLegibility;
@@ -87,6 +87,27 @@ select:focus-visible {
   left: 0;
   height: 32px;
   -webkit-app-region: drag;
+}
+
+.platform-win32 .window-drag-region,
+.platform-linux .window-drag-region {
+  display: none;
+}
+
+.platform-win32 .sidebar,
+.platform-linux .sidebar {
+  padding-top: 12px;
+}
+
+.platform-win32 .brand,
+.platform-linux .brand {
+  margin-top: 4px;
+}
+
+.platform-win32 .topbar,
+.platform-linux .topbar {
+  height: 68px;
+  padding-top: 0;
 }
 
 .brand {
@@ -1582,22 +1603,29 @@ button:disabled {
 
 .timeline-history-markers {
   position: relative;
-  display: flex;
-  flex-direction: column;
-  justify-content: safe center;
+  display: grid;
   height: 100%;
   padding: 4px 0;
   overflow: visible;
+  place-items: center;
 }
 
-.timeline-history-markers > button {
+.timeline-history-window {
+  display: flex;
+  width: 24px;
+  flex-direction: column;
+  align-items: center;
+  will-change: transform, opacity;
+}
+
+.timeline-history-window > button {
   position: relative;
   display: flex;
-  width: 22px;
+  width: 24px;
   min-height: 18px;
   flex: 0 0 18px;
   align-items: center;
-  justify-content: flex-start;
+  justify-content: center;
   padding: 0;
   border: 0;
   background: transparent;
@@ -1610,17 +1638,17 @@ button:disabled {
   height: 2px;
   border-radius: 99px;
   background: #d0d1d2;
-  transform-origin: left center;
+  transform-origin: center;
   transition: height 120ms ease, background 120ms ease, transform 120ms ease;
 }
 
-.timeline-history-markers > button:hover .timeline-history-line,
-.timeline-history-markers > button:focus-visible .timeline-history-line {
+.timeline-history-window > button:hover .timeline-history-line,
+.timeline-history-window > button:focus-visible .timeline-history-line {
   background: #6d6e72;
   transform: scaleX(1.08);
 }
 
-.timeline-history-markers > button.active .timeline-history-line {
+.timeline-history-window > button.active .timeline-history-line {
   height: 3px;
   background: #27282b;
   box-shadow: none;
@@ -1734,6 +1762,10 @@ button:disabled {
 }
 
 @media (prefers-reduced-motion: reduce) {
+  .timeline-history-window {
+    will-change: auto;
+  }
+
   .timeline-history-line {
     transition: none;
   }
@@ -2350,6 +2382,42 @@ button.timeline-card:hover {
 
 .work-item-card {
   min-height: 230px;
+}
+
+.work-items-timeline-page {
+  width: 100%;
+  padding-bottom: 40px;
+}
+
+.work-items-by-date {
+  display: grid;
+  gap: 24px;
+}
+
+.work-item-date-group {
+  min-width: 0;
+  scroll-margin-top: 16px;
+}
+
+.work-item-date-heading {
+  display: flex;
+  align-items: baseline;
+  margin-bottom: 10px;
+}
+
+.work-item-date-heading h3 {
+  margin: 0;
+  font-size: 14px;
+}
+
+.work-item-date-heading span {
+  margin-left: auto;
+  color: var(--faint);
+  font-size: 8px;
+}
+
+.work-items-by-date .card-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
 .work-item-expanded {

@@ -1,11 +1,28 @@
 import { describe, expect, it } from 'vitest'
 import {
+  codexCommandCandidates,
   formatCodexPlanLabel,
   parseCodexModelList,
   parseThreadId
 } from '@core/ai/providers/codex-cli'
 
 describe('Codex CLI integration helpers', () => {
+  it('discovers native Codex executables in Windows user and npm locations', () => {
+    const candidates = codexCommandCandidates(
+      'win32',
+      {
+        PATH: 'C:\\Tools;D:\\Codex',
+        APPDATA: 'C:\\Users\\Lin\\AppData\\Roaming',
+        WORKLENS_CODEX_PATH: 'C:\\Custom\\codex.exe'
+      },
+      'C:\\Users\\Lin'
+    )
+
+    expect(candidates[0]).toBe('C:\\Custom\\codex.exe')
+    expect(candidates.some((candidate) => candidate.endsWith('codex-win32-x64/vendor/x86_64-pc-windows-msvc/codex/codex.exe'))).toBe(true)
+    expect(candidates.every((candidate) => candidate.toLowerCase().endsWith('.exe'))).toBe(true)
+  })
+
   it('maps app-server model metadata without hard-coding model ids', () => {
     expect(
       parseCodexModelList({

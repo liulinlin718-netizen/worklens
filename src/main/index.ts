@@ -115,13 +115,14 @@ async function initializeServices(): Promise<void> {
 function createWindow(): void {
   mainWindow = new BrowserWindow({
     title: 'WorkLens',
-    width: 1440,
-    height: 920,
-    minWidth: 1080,
-    minHeight: 720,
+    width: 1360,
+    height: 860,
+    minWidth: 960,
+    minHeight: 640,
     show: false,
     backgroundColor: '#f3f1eb',
     titleBarStyle: process.platform === 'darwin' ? 'hiddenInset' : 'default',
+    autoHideMenuBar: process.platform === 'win32',
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
       contextIsolation: true,

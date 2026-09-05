@@ -1,7 +1,27 @@
 import { describe, expect, it } from 'vitest'
-import { buildPrompt, parseModelList } from '@core/ai/providers/cursor-cli'
+import {
+  buildPrompt,
+  cursorAgentCommandCandidates,
+  parseModelList
+} from '@core/ai/providers/cursor-cli'
 
 describe('Cursor CLI model discovery', () => {
+  it('discovers only native Cursor Agent executables on Windows', () => {
+    const candidates = cursorAgentCommandCandidates(
+      'win32',
+      {
+        PATH: 'C:\\Tools;D:\\Agents',
+        LOCALAPPDATA: 'C:\\Users\\Lin\\AppData\\Local',
+        WORKLENS_CURSOR_AGENT_PATH: 'C:\\Custom\\agent.exe'
+      },
+      'C:\\Users\\Lin'
+    )
+
+    expect(candidates.some((candidate) => candidate.binaryPath.endsWith('agent.exe'))).toBe(true)
+    expect(candidates.some((candidate) => candidate.binaryPath.endsWith('.cmd'))).toBe(false)
+    expect(candidates[0]?.binaryPath).toBe('C:\\Custom\\agent.exe')
+  })
+
   it('parses the documented human-readable model list without hard-coding ids', () => {
     const models = parseModelList(`Available models
 

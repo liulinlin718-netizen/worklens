@@ -1,6 +1,6 @@
 {
   "name": "worklens",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Local-first daily work organizer and stand-up script generator",
   "main": "./out/main/index.js",
   "scripts": {
@@ -12,8 +12,10 @@
     "test:watch": "vitest",
     "test:e2e": "playwright test",
     "test:packaged": "node scripts/smoke-packaged.mjs",
+    "generate:icons:win": "node scripts/generate-windows-icon.mjs",
     "package": "npm run build && electron-builder --dir",
-    "dist:mac": "npm run build && electron-builder --mac"
+    "dist:mac": "npm run build && electron-builder --mac",
+    "dist:win": "npm run build && npm run generate:icons:win && electron-builder --win nsis --x64"
   },
   "keywords": [
     "electron",

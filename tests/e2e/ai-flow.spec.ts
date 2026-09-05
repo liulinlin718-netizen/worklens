@@ -184,6 +184,31 @@ test('keeps every dated update, including multiple events on the same day', asyn
 
     const requestsBeforeReanalysis = analysisRequestCount
     await page.getByRole('button', { name: '工作事项', exact: true }).click()
+    const workItemHistoryMarkers = page.locator('.work-items-timeline-page .timeline-history-markers button')
+    await expect(workItemHistoryMarkers).toHaveCount(1)
+    await expect(workItemHistoryMarkers.first()).toHaveAttribute('aria-label', /7 月 16 日，1 个工作事项/)
+    await workItemHistoryMarkers.first().hover()
+    await expect(page.locator('#work-items-history-preview')).toContainText('7 月 16 日')
+    await expect(page.locator('#work-items-history-preview')).toContainText('游戏 Agent 记忆方案')
+    const workItemRailGeometry = await page.locator('.work-items-timeline-page').evaluate((workItemsPage) => {
+      const markers = workItemsPage.querySelector<HTMLElement>('.timeline-history-markers')!
+      const activeLine = markers.querySelector<HTMLElement>('[aria-current="date"] .timeline-history-line')!
+      const stream = workItemsPage.querySelector<HTMLElement>(':scope > .timeline-work-stream')!
+      const markersBox = markers.getBoundingClientRect()
+      const contentBox = document.querySelector<HTMLElement>('main.content')!.getBoundingClientRect()
+      const streamBox = stream.getBoundingClientRect()
+      const activeLineBox = activeLine.getBoundingClientRect()
+      const blankCenter = (contentBox.left + streamBox.left) / 2
+      return {
+        markerViewportCenterOffset: Math.abs(markersBox.top + markersBox.height / 2 - (contentBox.top + contentBox.height / 2)),
+        markerBlankCenterOffset: Math.abs(markersBox.left + markersBox.width / 2 - blankCenter),
+        activeLineBlankCenterOffset: Math.abs(activeLineBox.left + activeLineBox.width / 2 - blankCenter)
+      }
+    })
+    expect(workItemRailGeometry.markerViewportCenterOffset).toBeLessThan(2)
+    expect(workItemRailGeometry.markerBlankCenterOffset).toBeLessThan(2)
+    expect(workItemRailGeometry.activeLineBlankCenterOffset).toBeLessThan(2)
+    await page.mouse.move(0, 0)
     await page.getByRole('button', { name: '工作资料库', exact: true }).click()
     const sourceLibraryRow = page.locator('.source-library-row').filter({ hasText: 'Agent 记忆评审' })
     await expect(sourceLibraryRow).toContainText('2026-07-15 — 2026-07-16')
@@ -230,14 +255,17 @@ test('keeps every dated update, including multiple events on the same day', asyn
       const preview = document.querySelector<HTMLElement>('.timeline-history-tooltip')!
       const markersBox = markers.getBoundingClientRect()
       const contentBox = document.querySelector<HTMLElement>('main.content')!.getBoundingClientRect()
-      const pageBox = document.querySelector<HTMLElement>('.timeline-page')!.getBoundingClientRect()
+      const streamBox = document.querySelector<HTMLElement>('.timeline-page > .timeline-work-stream')!.getBoundingClientRect()
       const firstBox = buttons[0]!.getBoundingClientRect()
       const lastBox = buttons.at(-1)!.getBoundingClientRect()
+      const activeLineBox = buttons[0]!.querySelector<HTMLElement>('.timeline-history-line')!.getBoundingClientRect()
       const previewBox = preview.getBoundingClientRect()
+      const blankCenter = (contentBox.left + streamBox.left) / 2
       return {
         markerCenterOffset: Math.abs((firstBox.top + lastBox.bottom) / 2 - (markersBox.top + markersBox.height / 2)),
         markerViewportCenterOffset: Math.abs(markersBox.top + markersBox.height / 2 - (contentBox.top + contentBox.height / 2)),
-        markerLeftOffset: pageBox.left - markersBox.left,
+        markerBlankCenterOffset: Math.abs(markersBox.left + markersBox.width / 2 - blankCenter),
+        activeLineBlankCenterOffset: Math.abs(activeLineBox.left + activeLineBox.width / 2 - blankCenter),
         activeLineWidth: buttons[0]!.querySelector<HTMLElement>('.timeline-history-line')!.getBoundingClientRect().width,
         markerTop: markersBox.top,
         markerScrollTop: markers.scrollTop,
@@ -247,16 +275,20 @@ test('keeps every dated update, including multiple events on the same day', asyn
     })
     expect(timelineGeometry.markerCenterOffset).toBeLessThan(2)
     expect(timelineGeometry.markerViewportCenterOffset).toBeLessThan(2)
-    expect(timelineGeometry.markerLeftOffset).toBeGreaterThanOrEqual(11)
+    expect(timelineGeometry.markerBlankCenterOffset).toBeLessThan(2)
+    expect(timelineGeometry.activeLineBlankCenterOffset).toBeLessThan(2)
     expect(timelineGeometry.activeLineWidth).toBeLessThanOrEqual(22.1)
     expect(timelineGeometry.markerScrollTop).toBe(0)
     expect(timelineGeometry.previewCenterOffset).toBeLessThan(2)
     expect(timelineGeometry.previewHeight).toBeLessThanOrEqual(300)
     const wheelResult = await historyMarkers.first().evaluate(async (button) => {
       const activeSequence: string[] = []
+      let railAnimated = false
       const recordActive = (): void => {
         const label = document.querySelector<HTMLElement>('.timeline-history-markers [aria-current="date"]')?.getAttribute('aria-label') ?? ''
         if (label && activeSequence.at(-1) !== label) activeSequence.push(label)
+        const historyWindow = document.querySelector<HTMLElement>('.timeline-history-window')
+        if (historyWindow?.getAnimations().some((animation) => animation.playState === 'running')) railAnimated = true
       }
       recordActive()
       const canceled = !button.dispatchEvent(new WheelEvent('wheel', { deltaY: 120, bubbles: true, cancelable: true }))
@@ -265,12 +297,13 @@ test('keeps every dated update, including multiple events on the same day', asyn
         await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()))
         recordActive()
       }
-      return { canceled, activeSequence }
+      return { canceled, activeSequence, railAnimated }
     })
     expect(wheelResult.canceled).toBe(true)
     expect(wheelResult.activeSequence).toHaveLength(2)
     expect(wheelResult.activeSequence[0]).toContain('7 月 15 日')
     expect(wheelResult.activeSequence[1]).toContain('7 月 16 日')
+    expect(wheelResult.railAnimated).toBe(true)
     await expect(historyMarkers.last()).toHaveAttribute('aria-current', 'date')
     await page.waitForTimeout(350)
     const markerAfterWheel = await page.locator('.timeline-history-markers').evaluate((markers) => ({ top: markers.getBoundingClientRect().top, scrollTop: markers.scrollTop }))
