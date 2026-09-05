@@ -538,7 +538,7 @@ function callCodexAppServer(
       method: 'initialize',
       id: 0,
       params: {
-        clientInfo: { name: 'worklens', title: 'WorkLens', version: '0.1.2' }
+        clientInfo: { name: 'worklens', title: 'WorkLens', version: '0.1.3' }
       }
     })
   })
