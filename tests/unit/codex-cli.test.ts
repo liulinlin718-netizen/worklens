@@ -19,7 +19,9 @@ describe('Codex CLI integration helpers', () => {
     )
 
     expect(candidates[0]).toBe('C:\\Custom\\codex.exe')
-    expect(candidates.some((candidate) => candidate.endsWith('codex-win32-x64/vendor/x86_64-pc-windows-msvc/codex/codex.exe'))).toBe(true)
+    expect(candidates.some((candidate) => candidate
+      .replaceAll('\\', '/')
+      .endsWith('codex-win32-x64/vendor/x86_64-pc-windows-msvc/codex/codex.exe'))).toBe(true)
     expect(candidates.every((candidate) => candidate.toLowerCase().endsWith('.exe'))).toBe(true)
   })
 
