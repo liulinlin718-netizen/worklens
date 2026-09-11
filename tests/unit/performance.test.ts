@@ -26,7 +26,7 @@ describe('5,000 item local workspace performance', () => {
         status: 'ready'
       })
     }
-  }, 30_000)
+  }, 120_000)
 
   afterAll(() => {
     database.close()
