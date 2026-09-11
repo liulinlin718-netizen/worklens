@@ -15,7 +15,6 @@ import {
   getCodexCliStatus,
   loginCodexCli
 } from '@core/ai/providers/codex-cli'
-import { CursorProvider } from '@core/ai/providers/cursor'
 import { OpenAiCompatibleProvider } from '@core/ai/providers/openai-compatible'
 import type { CodexCliStatus, CursorCliStatus, ModelInfo } from '@shared/contracts'
 
@@ -95,10 +94,10 @@ function createProvider(request: AiHostRequest): GenerationProvider {
   if (request.configuration.kind === 'codex_cli') {
     return new CodexCliProvider(request.configuration)
   }
-  if (request.configuration.kind === 'cursor') {
-    return new CursorProvider(request.configuration, request.stateRoot)
+  if (request.configuration.kind === 'openai_compatible') {
+    return new OpenAiCompatibleProvider(request.configuration)
   }
-  return new OpenAiCompatibleProvider(request.configuration)
+  throw new ProviderError('不支持的 AI Provider', false, 'unsupported_provider')
 }
 
 function post(response: AiHostResponse): void {

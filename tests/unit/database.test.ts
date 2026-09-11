@@ -124,6 +124,68 @@ describe('WorkLensDatabase', () => {
     }
   })
 
+  it('migrates the removed Cursor API provider to a disconnected local Cursor setup', () => {
+    const filePath = join(directory, 'test.sqlite')
+    database.close()
+
+    const legacyDatabase = new DatabaseSync(filePath)
+    try {
+      legacyDatabase.prepare('DELETE FROM schema_migrations WHERE version = 5').run()
+      legacyDatabase.prepare(`
+        INSERT INTO settings(key, value_json, updated_at)
+        VALUES ('provider', ?, datetime('now'))
+        ON CONFLICT(key) DO UPDATE SET
+          value_json = excluded.value_json,
+          updated_at = excluded.updated_at
+      `).run(JSON.stringify({
+        kind: 'cursor',
+        model: 'cursor-large',
+        baseUrl: 'https://api.cursor.invalid',
+        sendImages: true,
+        autoAnalyze: false,
+        connected: true,
+        connectedAt: '2026-08-26T08:00:00.000Z',
+        connectionMessage: '连接正常'
+      }))
+    } finally {
+      legacyDatabase.close()
+    }
+
+    database = new WorkLensDatabase(filePath)
+
+    expect(database.getProviderSettings()).toEqual({
+      kind: 'cursor_cli',
+      model: 'auto',
+      baseUrl: '',
+      hasApiKey: false,
+      sendImages: true,
+      autoAnalyze: false,
+      connected: false,
+      connectedAt: null,
+      connectionMessage: 'Cursor API 已移除，请连接本机 Cursor、Codex 或外部 API'
+    })
+
+    const inspection = new DatabaseSync(filePath, { readOnly: true })
+    try {
+      const row = inspection
+        .prepare("SELECT value_json FROM settings WHERE key = 'provider'")
+        .get() as { value_json: string }
+      expect(JSON.parse(row.value_json)).toMatchObject({
+        kind: 'cursor_cli',
+        model: 'auto',
+        sendImages: true,
+        autoAnalyze: false,
+        connected: false,
+        connectedAt: null
+      })
+      expect(
+        inspection.prepare('SELECT 1 FROM schema_migrations WHERE version = 5').get()
+      ).toBeDefined()
+    } finally {
+      inspection.close()
+    }
+  })
+
   it('moves a source to a manually corrected date and locks later inference', () => {
     const source = database.createSource({
       title: '日期待修正的会议记录',

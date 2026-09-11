@@ -5,11 +5,10 @@ directories:
 files:
   - out/**
   - package.json
+  - LICENSE
   - node_modules/**
 asar: true
 asarUnpack:
-  - node_modules/@cursor/sdk/**
-  - node_modules/@cursor/sdk-*/**
   - node_modules/@napi-rs/**
   - node_modules/sharp/**
   - node_modules/@img/**

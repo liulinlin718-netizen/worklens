@@ -46,7 +46,7 @@ try {
   if (title !== 'WorkLens') throw new Error(`Unexpected app title: ${title}`)
   const [major, minor] = versions.node.split('.').map(Number)
   if ((major ?? 0) < 22 || ((major ?? 0) === 22 && (minor ?? 0) < 13)) {
-    throw new Error(`Cursor SDK requires Node 22.13+, packaged app has ${versions.node}`)
+    throw new Error(`WorkLens requires Node 22.13+, packaged app has ${versions.node}`)
   }
   const providerTest = await window.evaluate(async (baseUrl) => {
     await window.worklens.saveProviderSettings({

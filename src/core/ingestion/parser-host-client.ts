@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import { utilityProcess } from 'electron'
+import { buildChildEnvironment } from '@core/security/child-environment'
 import type {
   ParsedFile,
   ParserHostRequest,
@@ -33,7 +34,7 @@ export class UtilityParserRuntime implements ParserRuntime {
       const child = utilityProcess.fork(this.hostScriptPath, [], {
         serviceName: 'WorkLens Parser Host',
         stdio: 'pipe',
-        env: sanitizedEnvironment()
+        env: parserHostEnvironment()
       })
       let settled = false
       let stderr = ''
@@ -85,10 +86,8 @@ export class UtilityParserRuntime implements ParserRuntime {
   }
 }
 
-function sanitizedEnvironment(): Record<string, string> {
-  return Object.fromEntries(
-    Object.entries(process.env)
-      .filter(([key, value]) => Boolean(value) && key !== 'ELECTRON_RUN_AS_NODE')
-      .map(([key, value]) => [key, value as string])
-  )
+export function parserHostEnvironment(
+  source: NodeJS.ProcessEnv = process.env
+): NodeJS.ProcessEnv {
+  return buildChildEnvironment(source)
 }

@@ -277,7 +277,9 @@ export class AnalysisService {
       throw new Error('外部 Provider 需要 Base URL')
     }
     const current = this.database.getProviderSettings()
-    if (input.apiKey !== undefined) await this.secrets.set(secretKey(input.kind), input.apiKey)
+    if (input.kind === 'openai_compatible' && input.apiKey !== undefined) {
+      await this.secrets.set(secretKey(input.kind), input.apiKey)
+    }
     const connectionConfigurationUnchanged =
       current.kind === input.kind &&
       current.model === input.model &&
@@ -296,18 +298,6 @@ export class AnalysisService {
         : '设置已更新，请连接 AI'
     })
     return this.getProviderSettings()
-  }
-
-  async listCursorModels(): Promise<ModelInfo[]> {
-    const settings = await this.getProviderSettings()
-    const apiKey = await this.secrets.get(secretKey('cursor'))
-    if (!apiKey) throw new Error('请先保存 Cursor API Key')
-    return this.runtime.listModels({
-      kind: 'cursor',
-      apiKey,
-      model: settings.kind === 'cursor' && settings.model ? settings.model : 'auto',
-      baseUrl: ''
-    })
   }
 
   async listCursorCliModels(): Promise<ModelInfo[]> {
@@ -2113,7 +2103,7 @@ function buildStandupScript(
   ].filter(Boolean).join('\n\n')
 }
 
-function secretKey(kind: ProviderSettings['kind']): string {
+function secretKey(kind: 'openai_compatible'): string {
   return `provider:${kind}:api-key`
 }
 

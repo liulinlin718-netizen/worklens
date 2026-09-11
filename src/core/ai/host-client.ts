@@ -9,13 +9,14 @@ import type {
 } from '@core/ai/contracts'
 import { ProviderError } from '@core/ai/contracts'
 import type { AiHostRequest, AiHostResponse, AiRuntime } from '@core/ai/host-protocol'
+import {
+  buildChildEnvironment,
+  WORKLENS_CLI_PATH_ENVIRONMENT_KEYS
+} from '@core/security/child-environment'
 import type { CodexCliStatus, CursorCliStatus, ModelInfo } from '@shared/contracts'
 
 export class UtilityAiRuntime implements AiRuntime {
-  constructor(
-    private readonly hostScriptPath: string,
-    private readonly stateRoot: string
-  ) {}
+  constructor(private readonly hostScriptPath: string) {}
 
   async analyze(
     configuration: ProviderConfiguration,
@@ -27,8 +28,7 @@ export class UtilityAiRuntime implements AiRuntime {
         id: randomUUID(),
         type: 'analyze',
         configuration,
-        request,
-        stateRoot: this.stateRoot
+        request
       },
       signal,
       12 * 60_000
@@ -41,8 +41,7 @@ export class UtilityAiRuntime implements AiRuntime {
       {
         id: randomUUID(),
         type: 'test',
-        configuration,
-        stateRoot: this.stateRoot
+        configuration
       },
       undefined,
       45_000
@@ -59,8 +58,7 @@ export class UtilityAiRuntime implements AiRuntime {
         id: randomUUID(),
         type: 'answer-knowledge-question',
         configuration,
-        request,
-        stateRoot: this.stateRoot
+        request
       },
       signal,
       12 * 60_000
@@ -73,8 +71,7 @@ export class UtilityAiRuntime implements AiRuntime {
       {
         id: randomUUID(),
         type: 'list-models',
-        configuration,
-        stateRoot: this.stateRoot
+        configuration
       },
       undefined,
       45_000
@@ -86,8 +83,7 @@ export class UtilityAiRuntime implements AiRuntime {
     const value = await this.call(
       {
         id: randomUUID(),
-        type: 'cursor-cli-status',
-        stateRoot: this.stateRoot
+        type: 'cursor-cli-status'
       },
       undefined,
       30_000
@@ -99,8 +95,7 @@ export class UtilityAiRuntime implements AiRuntime {
     const value = await this.call(
       {
         id: randomUUID(),
-        type: 'cursor-cli-login',
-        stateRoot: this.stateRoot
+        type: 'cursor-cli-login'
       },
       undefined,
       5 * 60_000
@@ -112,8 +107,7 @@ export class UtilityAiRuntime implements AiRuntime {
     const value = await this.call(
       {
         id: randomUUID(),
-        type: 'codex-cli-status',
-        stateRoot: this.stateRoot
+        type: 'codex-cli-status'
       },
       undefined,
       30_000
@@ -125,8 +119,7 @@ export class UtilityAiRuntime implements AiRuntime {
     const value = await this.call(
       {
         id: randomUUID(),
-        type: 'codex-cli-login',
-        stateRoot: this.stateRoot
+        type: 'codex-cli-login'
       },
       undefined,
       5 * 60_000
@@ -148,7 +141,7 @@ export class UtilityAiRuntime implements AiRuntime {
       const child = utilityProcess.fork(this.hostScriptPath, [], {
         serviceName: 'WorkLens AI Host',
         stdio: 'pipe',
-        env: sanitizedEnvironment()
+        env: aiHostEnvironment()
       })
       let settled = false
       let stderr = ''
@@ -206,10 +199,11 @@ export class UtilityAiRuntime implements AiRuntime {
   }
 }
 
-function sanitizedEnvironment(): Record<string, string> {
-  return Object.fromEntries(
-    Object.entries(process.env)
-      .filter(([key, value]) => Boolean(value) && key !== 'ELECTRON_RUN_AS_NODE')
-      .map(([key, value]) => [key, value as string])
-  )
+export function aiHostEnvironment(
+  source: NodeJS.ProcessEnv = process.env
+): NodeJS.ProcessEnv {
+  return buildChildEnvironment(source, {
+    includeCodexHome: true,
+    worklensPathKeys: WORKLENS_CLI_PATH_ENVIRONMENT_KEYS
+  })
 }

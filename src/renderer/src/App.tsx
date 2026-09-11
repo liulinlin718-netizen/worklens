@@ -1728,16 +1728,6 @@ function SettingsPage({ notify, fail }: { notify: (message: string) => void; fai
         notify(`读取到 ${available.length} 个可用模型`)
         return
       }
-      if (settings.kind === 'cursor' && apiKey) {
-        setSettings(await window.worklens.saveProviderSettings({ kind: 'cursor', model: settings.model || 'auto', baseUrl: '', apiKey, sendImages: settings.sendImages, autoAnalyze: settings.autoAnalyze }))
-        setApiKey('')
-      }
-      if (settings.kind === 'cursor') {
-        const available = await window.worklens.listCursorModels()
-        setModels(available)
-        if (!settings.model && available[0]) setSettings((value) => ({ ...value, model: available[0]!.id, connected: false, connectedAt: null, connectionMessage: '模型已修改，请重新连接' }))
-        notify(`读取到 ${available.length} 个可用模型`)
-      }
     } catch (error) {
       fail(error)
     } finally {
@@ -1851,9 +1841,7 @@ function SettingsPage({ notify, fail }: { notify: (message: string) => void; fai
     ? '本机 Cursor'
     : settings.kind === 'codex_cli'
       ? '本机 Codex'
-      : settings.kind === 'cursor'
-        ? 'Cursor API'
-        : '外部 API'
+      : '外部 API'
   const selectProvider = (kind: ProviderSettings['kind']): void => {
     if (settings.kind === kind) return
     setModels([])
@@ -1879,7 +1867,6 @@ function SettingsPage({ notify, fail }: { notify: (message: string) => void; fai
         <div className="provider-tabs">
           <button className={settings.kind === 'cursor_cli' ? 'active' : ''} onClick={() => selectProvider('cursor_cli')}><Terminal size={16} />本机 Cursor</button>
           <button className={settings.kind === 'codex_cli' ? 'active' : ''} onClick={() => selectProvider('codex_cli')}><Bot size={16} />本机 Codex</button>
-          <button className={settings.kind === 'cursor' ? 'active' : ''} onClick={() => selectProvider('cursor')}><Sparkles size={16} />Cursor API</button>
           <button className={settings.kind === 'openai_compatible' ? 'active' : ''} onClick={() => selectProvider('openai_compatible')}><Network size={16} />外部 API</button>
         </div>
         <div className={`provider-connection-state ${settings.connected ? 'connected' : ''}`} role="status">
@@ -1903,8 +1890,8 @@ function SettingsPage({ notify, fail }: { notify: (message: string) => void; fai
             </div>
           )}
           {settings.kind === 'openai_compatible' && <label>Base URL<input value={settings.baseUrl} onChange={(event) => setSettings((value) => ({ ...value, baseUrl: event.target.value, connected: false, connectedAt: null, connectionMessage: '接口地址已修改，请重新连接' }))} placeholder="https://api.example.com/v1" /><small>必须使用 HTTPS；只有 localhost 可以使用 HTTP。</small></label>}
-          {!isLocalProvider && <label>API Key<div className="input-with-status"><input type="password" value={apiKey} onChange={(event) => { setApiKey(event.target.value); setSettings((value) => ({ ...value, connected: false, connectedAt: null, connectionMessage: '密钥已修改，请重新连接' })) }} placeholder={settings.hasApiKey ? '已安全保存，留空表示不修改' : '粘贴 API Key'} autoComplete="off" />{settings.hasApiKey && <CheckCircle2 size={17} />}</div><small>密钥由 macOS Keychain 加密，不进入业务数据库和导出包。</small></label>}
-          <label>模型<div className="model-row">{models.length && (settings.kind === 'cursor' || isLocalProvider) ? <select value={settings.model} onChange={(event) => setSettings((value) => ({ ...value, model: event.target.value, connected: false, connectedAt: null, connectionMessage: '模型已修改，请重新连接' }))}><option value="">选择模型</option>{models.map((model) => <option key={model.id} value={model.id}>{model.name}</option>)}</select> : <input value={settings.model} onChange={(event) => setSettings((value) => ({ ...value, model: event.target.value, connected: false, connectedAt: null, connectionMessage: '模型已修改，请重新连接' }))} placeholder={settings.kind === 'cursor' || isLocalProvider ? '点击刷新模型' : '模型 ID'} />}{(settings.kind === 'cursor' || isLocalProvider) && <button className="secondary-button" disabled={busy} onClick={() => void loadModels()}>刷新模型</button>}</div></label>
+          {!isLocalProvider && <label>API Key<div className="input-with-status"><input type="password" value={apiKey} onChange={(event) => { setApiKey(event.target.value); setSettings((value) => ({ ...value, connected: false, connectedAt: null, connectionMessage: '密钥已修改，请重新连接' })) }} placeholder={settings.hasApiKey ? '已安全保存，留空表示不修改' : '粘贴 API Key'} autoComplete="off" />{settings.hasApiKey && <CheckCircle2 size={17} />}</div><small>密钥由操作系统安全存储加密，不进入业务数据库和导出包。</small></label>}
+          <label>模型<div className="model-row">{models.length && isLocalProvider ? <select value={settings.model} onChange={(event) => setSettings((value) => ({ ...value, model: event.target.value, connected: false, connectedAt: null, connectionMessage: '模型已修改，请重新连接' }))}><option value="">选择模型</option>{models.map((model) => <option key={model.id} value={model.id}>{model.name}</option>)}</select> : <input value={settings.model} onChange={(event) => setSettings((value) => ({ ...value, model: event.target.value, connected: false, connectedAt: null, connectionMessage: '模型已修改，请重新连接' }))} placeholder={isLocalProvider ? '点击刷新模型' : '模型 ID'} />}{isLocalProvider && <button className="secondary-button" disabled={busy} onClick={() => void loadModels()}>刷新模型</button>}</div></label>
           <label className="check-row muted"><input type="checkbox" checked={settings.autoAnalyze} onChange={(event) => setSettings((value) => ({ ...value, autoAnalyze: event.target.checked }))} /><span><strong>记录或上传后自动生成日报</strong><small>同一天的内容会重新合并，并更新次日早会逐字稿。</small></span></label>
         </div>
         <div className="settings-actions"><button className="ghost-button" disabled={busy || !settings.model || (!isLocalProvider && !apiKey && !settings.hasApiKey)} onClick={() => void test()}>{settings.connected ? '重新连接' : '连接 AI'}</button><button className="primary-button" disabled={busy || !settings.model} onClick={() => void save()}>{busy ? <LoaderCircle size={16} className="spin" /> : <Check size={16} />}保存设置</button></div>

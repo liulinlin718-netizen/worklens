@@ -23,7 +23,6 @@ export const ProposalStatusSchema = z.enum(['pending', 'accepted', 'rejected'])
 export const ProviderKindSchema = z.enum([
   'cursor_cli',
   'codex_cli',
-  'cursor',
   'openai_compatible'
 ])
 
@@ -474,7 +473,6 @@ export interface WorkLensApi {
   createBackup(): Promise<ActionResult>
   getProviderSettings(): Promise<ProviderSettings>
   saveProviderSettings(input: SaveProviderSettings): Promise<ProviderSettings>
-  listCursorModels(): Promise<ModelInfo[]>
   listCursorCliModels(): Promise<ModelInfo[]>
   getCursorCliStatus(): Promise<CursorCliStatus>
   loginCursorCli(): Promise<CursorCliStatus>

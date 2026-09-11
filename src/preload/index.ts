@@ -39,7 +39,6 @@ const api: WorkLensApi = {
   getProviderSettings: () => ipcRenderer.invoke(IPC.getProviderSettings),
   saveProviderSettings: (input: SaveProviderSettings) =>
     ipcRenderer.invoke(IPC.saveProviderSettings, input),
-  listCursorModels: () => ipcRenderer.invoke(IPC.listCursorModels),
   listCursorCliModels: () => ipcRenderer.invoke(IPC.listCursorCliModels),
   getCursorCliStatus: () => ipcRenderer.invoke(IPC.getCursorCliStatus),
   loginCursorCli: () => ipcRenderer.invoke(IPC.loginCursorCli),

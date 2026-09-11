@@ -21,6 +21,7 @@ import type {
 } from '@core/ai/contracts'
 import { ProviderError } from '@core/ai/contracts'
 import { fallbackRefinementInstructions } from '@core/ai/refinement-prompt'
+import { buildChildEnvironment } from '@core/security/child-environment'
 
 const MAX_STDOUT_BYTES = 12 * 1024 * 1024
 const MAX_STDERR_BYTES = 1024 * 1024
@@ -492,11 +493,10 @@ function runCursorAgent(
   })
 }
 
-function cursorCliEnvironment(): NodeJS.ProcessEnv {
-  const environment = { ...process.env }
-  delete environment.CURSOR_API_KEY
-  delete environment.ELECTRON_RUN_AS_NODE
-  return environment
+export function cursorCliEnvironment(
+  source: NodeJS.ProcessEnv = process.env
+): NodeJS.ProcessEnv {
+  return buildChildEnvironment(source)
 }
 
 function firstNonEmptyString(...values: unknown[]): string | undefined {

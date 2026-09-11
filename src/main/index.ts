@@ -1,5 +1,6 @@
 import { copyFile, mkdir, mkdtemp, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
+import { pathToFileURL } from 'node:url'
 import {
   app,
   BrowserWindow,
@@ -107,7 +108,7 @@ async function initializeServices(): Promise<void> {
   analysis = new AnalysisService(
     database,
     secrets,
-    new UtilityAiRuntime(join(__dirname, 'ai-host.js'), stateRoot)
+    new UtilityAiRuntime(join(__dirname, 'ai-host.js'))
   )
   exporter = new ExportService(database)
 }
@@ -144,11 +145,14 @@ function createWindow(): void {
     mainWindow = null
   })
 
-  const rendererUrl = process.env.ELECTRON_RENDERER_URL
+  const rendererUrl = getDevelopmentRendererUrl(
+    app.isPackaged,
+    process.env.ELECTRON_RENDERER_URL
+  )
   if (rendererUrl) {
     void mainWindow.loadURL(rendererUrl)
   } else {
-    void mainWindow.loadFile(join(__dirname, '../renderer/index.html'))
+    void mainWindow.loadFile(getPackagedRendererPath())
   }
 }
 
@@ -433,11 +437,6 @@ function registerIpcHandlers(): void {
   )
 
   ipcMain.handle(
-    IPC.listCursorModels,
-    guard(() => requireAnalysis().listCursorModels())
-  )
-
-  ipcMain.handle(
     IPC.listCursorCliModels,
     guard(() => requireAnalysis().listCursorCliModels())
   )
@@ -633,12 +632,77 @@ function guard<T extends unknown[], R>(
 }
 
 function assertTrustedSender(event: IpcMainInvokeEvent): void {
+  if (
+    !mainWindow ||
+    event.sender !== mainWindow.webContents ||
+    !event.senderFrame ||
+    event.senderFrame !== event.sender.mainFrame
+  ) {
+    throw new Error('拒绝来自非受信页面的请求')
+  }
+
   const url = event.senderFrame?.url ?? ''
-  const developmentUrl = process.env.ELECTRON_RENDERER_URL
-  const trusted =
-    (developmentUrl && url.startsWith(developmentUrl)) ||
-    (!developmentUrl && url.startsWith('file://'))
+  const trusted = isTrustedRendererUrl(
+    url,
+    app.isPackaged,
+    process.env.ELECTRON_RENDERER_URL,
+    getPackagedRendererPath()
+  )
   if (!trusted) throw new Error('拒绝来自非受信页面的请求')
+}
+
+function getPackagedRendererPath(): string {
+  return join(__dirname, '../renderer/index.html')
+}
+
+export function getDevelopmentRendererUrl(
+  isPackaged: boolean,
+  configuredUrl: string | undefined
+): string | undefined {
+  if (isPackaged || !configuredUrl) return undefined
+
+  try {
+    const url = new URL(configuredUrl)
+    if (
+      (url.protocol !== 'http:' && url.protocol !== 'https:') ||
+      !['localhost', '127.0.0.1', '[::1]'].includes(url.hostname) ||
+      url.username ||
+      url.password
+    ) {
+      return undefined
+    }
+    return url.href
+  } catch {
+    return undefined
+  }
+}
+
+export function isTrustedRendererUrl(
+  candidateUrl: string,
+  isPackaged: boolean,
+  configuredDevelopmentUrl: string | undefined,
+  packagedRendererPath: string
+): boolean {
+  const expectedUrl =
+    getDevelopmentRendererUrl(isPackaged, configuredDevelopmentUrl) ??
+    pathToFileURL(packagedRendererPath).href
+
+  try {
+    const candidate = new URL(candidateUrl)
+    const expected = new URL(expectedUrl)
+    return (
+      candidate.protocol === expected.protocol &&
+      candidate.origin === expected.origin &&
+      candidate.host === expected.host &&
+      candidate.username === expected.username &&
+      candidate.password === expected.password &&
+      candidate.pathname === expected.pathname &&
+      candidate.search === expected.search &&
+      candidate.hash === expected.hash
+    )
+  } catch {
+    return false
+  }
 }
 
 function broadcastDataChanged(): void {

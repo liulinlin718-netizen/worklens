@@ -175,6 +175,12 @@ if (args.includes('--version')) {
 
     const invocationsBeforeOpeningSettings = readFileSync(invocationLogPath, 'utf8')
     await page.getByRole('button', { name: 'AI 设置' }).click()
+    await expect(page.getByRole('button', { name: 'Cursor API' })).toHaveCount(0)
+    await expect(page.locator('.provider-tabs button')).toHaveText([
+      '本机 Cursor',
+      '本机 Codex',
+      '外部 API'
+    ])
     await expect(page.locator('.provider-connection-state')).toContainText('本机 Cursor 已连接')
     await expect(page.locator('.provider-connection-state')).toContainText('连接会持续保留')
     await page.getByRole('button', { name: '工作看板' }).click()

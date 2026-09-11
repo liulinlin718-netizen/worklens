@@ -21,6 +21,7 @@ import type {
   ProviderConfiguration
 } from '@core/ai/contracts'
 import { ProviderError } from '@core/ai/contracts'
+import { buildChildEnvironment } from '@core/security/child-environment'
 import {
   buildKnowledgePrompt,
   buildPrompt,
@@ -622,12 +623,10 @@ function runCodex(
   })
 }
 
-function codexEnvironment(): NodeJS.ProcessEnv {
-  const environment = { ...process.env }
-  delete environment.OPENAI_API_KEY
-  delete environment.CODEX_API_KEY
-  delete environment.ELECTRON_RUN_AS_NODE
-  return environment
+export function codexEnvironment(
+  source: NodeJS.ProcessEnv = process.env
+): NodeJS.ProcessEnv {
+  return buildChildEnvironment(source, { includeCodexHome: true })
 }
 
 function extractCodexError(output: string): string {

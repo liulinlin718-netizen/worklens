@@ -13,7 +13,7 @@ export default defineConfig({
     plugins: [externalizeDepsPlugin()],
     resolve: { alias: aliases },
     build: {
-      sourcemap: true,
+      sourcemap: false,
       rollupOptions: {
         input: {
           index: resolve('src/main/index.ts'),
@@ -31,7 +31,7 @@ export default defineConfig({
     plugins: [externalizeDepsPlugin()],
     resolve: { alias: aliases },
     build: {
-      sourcemap: true,
+      sourcemap: false,
       rollupOptions: {
         input: resolve('src/preload/index.ts'),
         output: {
@@ -46,7 +46,7 @@ export default defineConfig({
     resolve: { alias: aliases },
     plugins: [react()],
     build: {
-      sourcemap: true
+      sourcemap: false
     }
   }
 })

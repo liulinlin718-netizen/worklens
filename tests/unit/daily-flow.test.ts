@@ -1,7 +1,7 @@
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { AnalysisService } from '@core/ai/analyzer'
 import type { AiRuntime } from '@core/ai/host-protocol'
 import type { SecureSecretStore } from '@core/storage/secure-store'
@@ -17,8 +17,38 @@ describe('daily work synthesis flow', () => {
   })
 
   afterEach(() => {
+    vi.useRealTimers()
     database.close()
     rmSync(directory, { recursive: true, force: true })
+  })
+
+  it('keeps source creation order when multiple records share a timestamp', () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-08-24T10:00:00.000Z'))
+
+    const first = database.createSource({
+      title: '第一条记录',
+      kind: 'text',
+      rawText: '第一条内容',
+      businessDate: '2026-08-24',
+      datePrecision: 'day',
+      dateOrigin: 'manual',
+      contentHash: 'stable-order-1'
+    })
+    const second = database.createSource({
+      title: '第二条记录',
+      kind: 'text',
+      rawText: '第二条内容',
+      businessDate: '2026-08-24',
+      datePrecision: 'day',
+      dateOrigin: 'manual',
+      contentHash: 'stable-order-2'
+    })
+
+    expect(database.listSourcesForDate('2026-08-24').map((source) => source.id)).toEqual([
+      first.id,
+      second.id
+    ])
   })
 
   it('combines every source from one workday and materializes the brief without review', async () => {

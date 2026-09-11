@@ -1,7 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { AnalysisRequest } from '@core/ai/contracts'
 import { buildPrompt as buildCliPrompt } from '@core/ai/providers/cursor-cli'
-import { buildPrompt as buildCursorPrompt } from '@core/ai/providers/cursor'
 import { buildPrompt as buildOpenAiCompatiblePrompt } from '@core/ai/providers/openai-compatible'
 
 const request: AnalysisRequest = {
@@ -24,7 +23,6 @@ const request: AnalysisRequest = {
 const prompts = [
   ['Cursor CLI', buildCliPrompt(request, 'inline')],
   ['Codex CLI', buildCliPrompt(request, 'stdin')],
-  ['Cursor SDK', buildCursorPrompt(request)],
   ['OpenAI compatible', buildOpenAiCompatiblePrompt(request)]
 ] as const
 
@@ -37,7 +35,6 @@ const refinementRequest: AnalysisRequest = {
 const refinementPrompts = [
   ['Cursor CLI', buildCliPrompt(refinementRequest, 'inline')],
   ['Codex CLI', buildCliPrompt(refinementRequest, 'stdin')],
-  ['Cursor SDK', buildCursorPrompt(refinementRequest)],
   ['OpenAI compatible', buildOpenAiCompatiblePrompt(refinementRequest)]
 ] as const
 

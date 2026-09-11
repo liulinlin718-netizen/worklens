@@ -40,6 +40,8 @@ type Row = Record<string, unknown>
 
 const INTERRUPTED_JOB_MESSAGE = '上次整理因应用退出而中断，可重新整理'
 const INTERRUPTED_JOB_ERROR = '任务在完成前被中断'
+const LEGACY_CURSOR_PROVIDER_MESSAGE =
+  'Cursor API 已移除，请连接本机 Cursor、Codex 或外部 API'
 
 export interface CreateSourceRecord {
   title: string
@@ -361,6 +363,8 @@ export class WorkLensDatabase {
       INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (4, datetime('now'));
     `)
 
+    this.migrateLegacyCursorProviderSettings()
+
     try {
       this.db.exec(`
         CREATE VIRTUAL TABLE IF NOT EXISTS search_index USING fts5(
@@ -384,6 +388,35 @@ export class WorkLensDatabase {
     }
 
     this.recoverInterruptedWork()
+  }
+
+  private migrateLegacyCursorProviderSettings(): void {
+    const applied = this.db
+      .prepare('SELECT 1 FROM schema_migrations WHERE version = 5')
+      .get()
+    if (applied) return
+
+    this.transaction(() => {
+      const stored = this.getSetting('provider')
+      const value = stored ? parseRecord(stored) : {}
+      if (value.kind === 'cursor') {
+        this.setSetting('provider', {
+          kind: 'cursor_cli',
+          model: 'auto',
+          baseUrl: '',
+          sendImages: value.sendImages === true,
+          autoAnalyze: value.autoAnalyze !== false,
+          connected: false,
+          connectedAt: null,
+          connectionMessage: LEGACY_CURSOR_PROVIDER_MESSAGE
+        })
+      }
+      this.db
+        .prepare(
+          "INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (5, datetime('now'))"
+        )
+        .run()
+    })
   }
 
   private recoverInterruptedWork(): void {
@@ -527,7 +560,7 @@ export class WorkLensDatabase {
                WHERE e.event_date = ?
              )
           GROUP BY s.id
-          ORDER BY s.created_at ASC
+          ORDER BY s.created_at ASC, s.rowid ASC
         `)
         .all(workDate, workDate, workDate) as Row[]
     ).map(mapSource).map((source) => this.withSourceWorkDates(source))
@@ -1383,31 +1416,39 @@ export class WorkLensDatabase {
   getProviderSettings(): ProviderSettings {
     const stored = this.getSetting('provider')
     const value = stored ? parseRecord(stored) : {}
-    const kind =
-      value.kind === 'cursor' ||
+    const legacyCursorProvider = value.kind === 'cursor'
+    const kind: ProviderSettings['kind'] =
       value.kind === 'openai_compatible' ||
       value.kind === 'cursor_cli' ||
       value.kind === 'codex_cli'
         ? value.kind
         : 'cursor_cli'
+    const supportedProvider =
+      value.kind === 'openai_compatible' ||
+      value.kind === 'cursor_cli' ||
+      value.kind === 'codex_cli'
     return {
       kind,
       model:
-        typeof value.model === 'string' && value.model
+        !legacyCursorProvider && typeof value.model === 'string' && value.model
           ? value.model
           : kind === 'cursor_cli' || kind === 'codex_cli'
             ? 'auto'
             : '',
-      baseUrl: typeof value.baseUrl === 'string' ? value.baseUrl : '',
+      baseUrl:
+        !legacyCursorProvider && typeof value.baseUrl === 'string' ? value.baseUrl : '',
       hasApiKey: false,
       sendImages: value.sendImages === true,
       autoAnalyze: value.autoAnalyze !== false,
-      connected: value.connected === true,
-      connectedAt: typeof value.connectedAt === 'string' ? value.connectedAt : null,
+      connected: supportedProvider && value.connected === true,
+      connectedAt:
+        supportedProvider && typeof value.connectedAt === 'string' ? value.connectedAt : null,
       connectionMessage:
-        typeof value.connectionMessage === 'string' && value.connectionMessage
-          ? value.connectionMessage
-          : '未连接 AI'
+        legacyCursorProvider
+          ? LEGACY_CURSOR_PROVIDER_MESSAGE
+          : typeof value.connectionMessage === 'string' && value.connectionMessage
+            ? value.connectionMessage
+            : '未连接 AI'
     }
   }
 

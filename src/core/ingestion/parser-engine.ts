@@ -82,11 +82,13 @@ export class LocalParserEngine implements ParserRuntime {
         require.resolve('pdfjs-dist/legacy/build/pdf.worker.mjs')
       ).href
     }
-    const loadingTask = pdfjs.getDocument({
+    const documentOptions = {
       data: new Uint8Array(buffer),
+      enableScripting: false,
       useSystemFonts: true,
       CanvasFactory: NapiCanvasFactory
-    })
+    }
+    const loadingTask = pdfjs.getDocument(documentOptions)
     const document = await loadingTask.promise
     if (document.numPages > MAX_PDF_PAGES) {
       await loadingTask.destroy()

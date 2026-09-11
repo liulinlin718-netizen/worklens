@@ -32,46 +32,38 @@ export type AiHostRequest =
       type: 'analyze'
       configuration: ProviderConfiguration
       request: AnalysisRequest
-      stateRoot: string
     }
   | {
       id: string
       type: 'test'
       configuration: ProviderConfiguration
-      stateRoot: string
     }
   | {
       id: string
       type: 'answer-knowledge-question'
       configuration: ProviderConfiguration
       request: KnowledgeQuestionRequest
-      stateRoot: string
     }
   | {
       id: string
       type: 'list-models'
       configuration: ProviderConfiguration
-      stateRoot: string
     }
   | {
       id: string
       type: 'cursor-cli-status'
-      stateRoot: string
     }
   | {
       id: string
       type: 'cursor-cli-login'
-      stateRoot: string
     }
   | {
       id: string
       type: 'codex-cli-status'
-      stateRoot: string
     }
   | {
       id: string
       type: 'codex-cli-login'
-      stateRoot: string
     }
 
 export type AiHostResponse =

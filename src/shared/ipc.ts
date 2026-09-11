@@ -21,7 +21,6 @@ export const IPC = {
   createBackup: 'worklens:create-backup',
   getProviderSettings: 'worklens:get-provider-settings',
   saveProviderSettings: 'worklens:save-provider-settings',
-  listCursorModels: 'worklens:list-cursor-models',
   listCursorCliModels: 'worklens:list-cursor-cli-models',
   getCursorCliStatus: 'worklens:get-cursor-cli-status',
   loginCursorCli: 'worklens:login-cursor-cli',

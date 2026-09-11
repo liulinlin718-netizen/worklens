@@ -6,6 +6,7 @@ import { AnalysisService } from '@core/ai/analyzer'
 import type { AiRuntime } from '@core/ai/host-protocol'
 import type { SecureSecretStore } from '@core/storage/secure-store'
 import { WorkLensDatabase } from '@core/storage/database'
+import { SaveProviderSettingsSchema } from '@shared/contracts'
 
 describe('persistent AI connection', () => {
   let directory: string
@@ -140,5 +141,15 @@ describe('persistent AI connection', () => {
       connected: false,
       connectionMessage: '设置已更新，请连接 AI'
     })
+  })
+
+  it('rejects settings for the removed Cursor API provider', () => {
+    expect(SaveProviderSettingsSchema.safeParse({
+      kind: 'cursor',
+      model: 'auto',
+      baseUrl: '',
+      sendImages: false,
+      autoAnalyze: true
+    }).success).toBe(false)
   })
 })
