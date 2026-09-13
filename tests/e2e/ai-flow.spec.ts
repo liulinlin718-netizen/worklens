@@ -5,8 +5,9 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { _electron as electron, expect, test } from '@playwright/test'
 
-test('keeps every dated update, including multiple events on the same day', async () => {
+test('keeps every dated update, including multiple events on the same day', async ({}, testInfo) => {
   let analysisRequestCount = 0
+  let includeMergeCandidate = false
   const server = createServer((request, response) => {
     response.setHeader('Content-Type', 'application/json')
     if (request.method === 'GET' && request.url === '/v1/models') {
@@ -48,8 +49,8 @@ test('keeps every dated update, including multiple events on the same day', asyn
                     },
                     {
                       title: '补充记忆回放验收清单',
-                      workItemKey: 'agent-memory-plan',
-                      workItemTitle: '游戏 Agent 记忆方案',
+                      workItemKey: includeMergeCandidate ? 'release-checklist' : 'agent-memory-plan',
+                      workItemTitle: includeMergeCandidate ? '发布验收清单' : '游戏 Agent 记忆方案',
                       eventType: '验证',
                       eventDate: '2026-07-16',
                       datePrecision: 'day',
@@ -161,6 +162,10 @@ test('keeps every dated update, including multiple events on the same day', asyn
     expect(finalSnapshot.dailyBriefs[0]!.script).toContain('大家早上好')
 
     await page.getByRole('button', { name: '早会逐字稿' }).click()
+    await expect(page.getByLabel('逐字稿阅读正文')).toBeVisible()
+    await expect(page.getByText('早会使用日期 · 2026-07-17')).toBeVisible()
+    expect(await page.getByLabel('逐字稿阅读正文').locator('p').first().evaluate((element) => getComputedStyle(element).fontSize)).toBe('18px')
+    await page.getByRole('button', { name: '编辑稿件' }).click()
     const scriptEditor = page.getByLabel('逐字稿正文')
     await expect(scriptEditor).toBeVisible()
     await scriptEditor.fill('大家早上好，昨天完成了记忆方案评审。今天继续完善失败重试入口。')
@@ -176,8 +181,33 @@ test('keeps every dated update, including multiple events on the same day', asyn
       )
     })
     await expect(page.locator('.script-image-grid figure')).toHaveCount(1)
+    await expect(page.getByText('有未提交修改 · 草稿已自动保存在本机')).toBeVisible()
+    await page.getByLabel('早会稿日期历史').getByRole('button', { name: /7 月 15 日/ }).click()
+    await expect(scriptEditor).not.toHaveValue(/继续完善失败重试入口/)
+    await page.getByLabel('早会稿日期历史').getByRole('button', { name: /7 月 16 日/ }).click()
+    await expect(scriptEditor).toHaveValue(/继续完善失败重试入口/)
+    await expect(page.locator('.script-image-grid figure')).toHaveCount(1)
+    await page.reload()
+    await page.getByRole('button', { name: '早会逐字稿' }).click()
+    await expect(page.getByLabel('逐字稿阅读正文')).toContainText('继续完善失败重试入口')
+    await expect(page.locator('.script-image-grid figure')).toHaveCount(1)
+    await page.getByRole('button', { name: '收起历史' }).click()
+    await expect(page.getByLabel('早会稿日期历史')).toHaveCount(0)
+    await page.screenshot({ path: testInfo.outputPath('brief-reading-mode.png') })
+    await electronApp.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]!.setSize(960, 860))
+    await expect.poll(() => page.evaluate(() => window.innerWidth)).toBe(960)
+    await page.screenshot({ path: testInfo.outputPath('brief-reading-mode-960.png') })
+    await electronApp.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]!.setSize(960, 640))
+    await expect.poll(() => page.evaluate(() => window.innerHeight)).toBe(640)
+    await page.screenshot({ path: testInfo.outputPath('brief-reading-mode-960x640.png') })
+    const brief_reading_modeSidebar = await page.locator('.sidebar').evaluate((sidebar) => ({ navBottom: sidebar.querySelector('nav')!.getBoundingClientRect().bottom, statusTop: sidebar.querySelector('.local-status')!.getBoundingClientRect().top, statusBottom: sidebar.querySelector('.local-status')!.getBoundingClientRect().bottom }))
+    expect(brief_reading_modeSidebar.navBottom).toBeLessThanOrEqual(brief_reading_modeSidebar.statusTop)
+    expect(brief_reading_modeSidebar.statusBottom).toBeLessThanOrEqual(640)
+    expect(await page.locator('.brief-main').evaluate((element) => element.scrollWidth <= element.clientWidth + 1)).toBe(true)
+    await electronApp.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]!.setSize(1360, 860))
+    await expect.poll(() => page.evaluate(() => window.innerWidth)).toBe(1360)
     await page.getByRole('button', { name: '保存修改' }).click()
-    await expect(page.getByText('逐字稿修改已保存')).toBeVisible()
+    await expect(page.getByText('逐字稿已保存；人工修改会保留，AI 新稿可单独比较')).toBeVisible()
     const editedBrief = (await page.evaluate(() => window.worklens.getSnapshot())).dailyBriefs[0]!
     expect(editedBrief.script).toContain('继续完善失败重试入口')
     expect(editedBrief.images).toHaveLength(1)
@@ -209,7 +239,7 @@ test('keeps every dated update, including multiple events on the same day', asyn
     expect(workItemRailGeometry.markerBlankCenterOffset).toBeLessThan(2)
     expect(workItemRailGeometry.activeLineBlankCenterOffset).toBeLessThan(2)
     await page.mouse.move(0, 0)
-    await page.getByRole('button', { name: '工作资料库', exact: true }).click()
+    await page.getByLabel('主要工作入口').getByRole('button', { name: '工作资料库', exact: true }).click()
     const sourceLibraryRow = page.locator('.source-library-row').filter({ hasText: 'Agent 记忆评审' })
     await expect(sourceLibraryRow).toContainText('2026-07-15 — 2026-07-16')
     await sourceLibraryRow.getByRole('button', { name: '重新整理：Agent 记忆评审' }).click()
@@ -222,7 +252,43 @@ test('keeps every dated update, including multiple events on the same day', asyn
       expect.objectContaining({ title: '游戏 Agent 记忆方案', eventCount: 3, latestDate: '2026-07-16' })
     ])
 
+    const protectedBrief = reanalyzedSnapshot.dailyBriefs.find((brief) => brief.id === editedBrief.id)!
+    expect(protectedBrief.script).toBe(editedBrief.script)
+    expect(protectedBrief.images).toEqual(editedBrief.images)
+    expect(protectedBrief.pendingAiVersionId).toBeTruthy()
+    await page.getByRole('button', { name: '早会逐字稿' }).click()
+    await expect(page.getByLabel('逐字稿阅读正文')).toContainText('继续完善失败重试入口')
+    await page.getByRole('button', { name: '比较新稿' }).click()
+    await expect(page.getByLabel('稿件版本比较')).toContainText('今天补充失败重试入口')
+    await page.screenshot({ path: testInfo.outputPath('brief-version-comparison.png') })
+    await electronApp.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]!.setSize(960, 860))
+    await expect.poll(() => page.evaluate(() => window.innerWidth)).toBe(960)
+    await page.screenshot({ path: testInfo.outputPath('brief-version-comparison-960.png') })
+    await electronApp.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]!.setSize(960, 640))
+    await expect.poll(() => page.evaluate(() => window.innerHeight)).toBe(640)
+    await page.screenshot({ path: testInfo.outputPath('brief-version-comparison-960x640.png') })
+    const brief_version_comparisonSidebar = await page.locator('.sidebar').evaluate((sidebar) => ({ navBottom: sidebar.querySelector('nav')!.getBoundingClientRect().bottom, statusTop: sidebar.querySelector('.local-status')!.getBoundingClientRect().top, statusBottom: sidebar.querySelector('.local-status')!.getBoundingClientRect().bottom }))
+    expect(brief_version_comparisonSidebar.navBottom).toBeLessThanOrEqual(brief_version_comparisonSidebar.statusTop)
+    expect(brief_version_comparisonSidebar.statusBottom).toBeLessThanOrEqual(640)
+    expect(await page.locator('.brief-main').evaluate((element) => element.scrollWidth <= element.clientWidth + 1)).toBe(true)
+    await electronApp.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]!.setSize(1360, 860))
+    await expect.poll(() => page.evaluate(() => window.innerWidth)).toBe(1360)
+    await page.getByRole('button', { name: '采用 AI 新稿' }).click()
+    await expect(page.getByLabel('逐字稿阅读正文')).not.toContainText('继续完善失败重试入口')
+    const revisions = await page.evaluate((briefId) => window.worklens.listDailyBriefVersions(briefId), editedBrief.id)
+    const manualRevision = revisions.find((version) => version.kind === 'manual' && version.script === editedBrief.script)!
+    expect(manualRevision).toBeTruthy()
+    await page.getByLabel('选择稿件版本').selectOption(manualRevision.versionId)
+    await page.getByRole('button', { name: '恢复此版本' }).click()
+    await expect(page.getByLabel('逐字稿阅读正文')).toContainText('继续完善失败重试入口')
+    await expect(page.locator('.script-paper .script-image-grid figure')).toHaveCount(1)
+
     await page.getByRole('button', { name: '工作时间线' }).click()
+    await electronApp.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]!.setSize(960, 640))
+    await page.getByRole('button', { name: '最近工作', exact: true }).click()
+    await page.screenshot({ path: testInfo.outputPath('timeline-recent-960x640.png') })
+    expect(await page.locator('.timeline-page').evaluate((element) => element.scrollWidth <= element.clientWidth + 1)).toBe(true)
+    await electronApp.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]!.setSize(1360, 860))
     const contentScrollbar = await page.locator('main.content').evaluate((content) => {
       const style = getComputedStyle(content)
       const scrollbarStyle = getComputedStyle(content, '::-webkit-scrollbar')
@@ -411,6 +477,33 @@ test('keeps every dated update, including multiple events on the same day', asyn
     expect(deletedSnapshot.sources).toHaveLength(0)
     expect(deletedSnapshot.events).toHaveLength(0)
     expect(deletedSnapshot.workItems).toHaveLength(0)
+
+    // Separate local fixture checks correction/merge controls at the smallest supported window.
+    includeMergeCandidate = true
+    await page.evaluate(() => window.worklens.captureText({ title: '最小窗口事项校对', text: '7.15：完成游戏 Agent 记忆方案评审。\n7.16：开始验证记忆方案，需要增加失败重试入口。\n补充记忆回放验收清单。', businessDate: null }))
+    await expect.poll(() => page.evaluate(async () => (await window.worklens.getSnapshot()).workItems.length)).toBe(2)
+    await page.getByLabel('主要工作入口').getByRole('button', { name: '工作事项', exact: true }).click()
+    await electronApp.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]!.setSize(960, 640))
+    await page.getByRole('button', { name: '最近更新', exact: true }).click()
+    await page.getByRole('button', { name: '修改标题和分类：补充记忆回放验收清单' }).click()
+    await expect(page.getByRole('dialog')).toBeVisible()
+    await page.screenshot({ path: testInfo.outputPath('work-item-edit-960x640.png') })
+    await page.getByLabel('事项标题').fill('发布验收清单已核对')
+    await page.getByRole('dialog').getByRole('button', { name: '保存修改' }).click()
+    await expect(page.getByRole('dialog')).toHaveCount(0)
+    await page.getByRole('button', { name: '合并工作事项：发布验收清单已核对' }).click()
+    const mergeTarget = (await page.evaluate(() => window.worklens.getSnapshot())).workItems.find((item) => item.title === '游戏 Agent 记忆方案')!
+    await page.getByRole('dialog').getByRole('combobox').selectOption(mergeTarget.key)
+    await page.screenshot({ path: testInfo.outputPath('work-item-merge-960x640.png') })
+    const mergeDialog = await page.getByRole('dialog').boundingBox()
+    expect(mergeDialog!.y).toBeGreaterThanOrEqual(0)
+    expect(mergeDialog!.y + mergeDialog!.height).toBeLessThanOrEqual(640)
+    await page.getByRole('button', { name: '合并到所选事项' }).click()
+    await expect(page.getByRole('dialog')).toHaveCount(0)
+    await expect.poll(() => page.evaluate(async () => (await window.worklens.getSnapshot()).workItems.length)).toBe(1)
+    await page.locator('.sidebar').getByRole('button', { name: 'AI 设置', exact: true }).click()
+    await expect(page.getByRole('heading', { level: 1, name: 'AI 设置' })).toBeVisible()
+
   } finally {
     await electronApp.close()
     await new Promise<void>((resolve, reject) =>

@@ -1,0 +1,40 @@
+.brief-experience.history-collapsed { grid-template-columns: minmax(0, 1fr); max-width: 960px; }
+.brief-experience .brief-toolbar { flex-wrap: wrap; }
+.brief-experience .brief-date-menu { width: 190px; }
+.brief-history-toggle { white-space: nowrap; }
+.brief-draft-status, .brief-notice, .brief-version-head, .brief-version-actions, .brief-reading-controls { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.brief-draft-status { flex-wrap: wrap; margin: 0 2px 10px; color: #777190; font-size: 11px; }
+.brief-notice { padding: 11px 14px; margin-bottom: 12px; border: 1px solid #ddd6f2; border-radius: 10px; color: #67568e; background: #f7f4ff; font-size: 12px; line-height: 1.7; }
+.brief-notice.warning { border-color: #ebd4a1; background: #fff9ed; color: #8a652c; }
+.brief-notice button { flex-shrink: 0; }
+.brief-reading-controls { padding: 12px 24px; border-bottom: 1px solid #ece8f4; }
+.brief-reading-controls > div { display: flex; padding: 3px; border-radius: 8px; background: #f1eef7; }
+.brief-reading-controls button { border: 0; border-radius: 6px; padding: 7px 13px; background: transparent; color: #777190; font: inherit; font-size: 12px; cursor: pointer; }
+.brief-reading-controls button.active { background: white; color: var(--violet); box-shadow: 0 1px 4px #33235c12; }
+.brief-reading-controls > span { color: #8e8b98; font-size: 11px; }
+.brief-experience .script-paper.reading { padding: 30px clamp(24px, 5vw, 60px); background: #fffefa; }
+.brief-experience .script-paper.reading p { max-width: 45em; margin: 0 auto 1.2em; font-size: 18px; line-height: 2; white-space: pre-wrap; overflow-wrap: anywhere; }
+.brief-experience .script-paper textarea { font-size: 16px; line-height: 1.9; min-height: 380px; background: white; }
+.brief-experience .script-paste-hint { font-size: 11px; }
+.brief-experience .script-card-head p { font-size: 11px; }
+.brief-experience .script-meta { font-size: 10px; }
+.brief-versions { padding: 16px; margin-bottom: 14px; font-size: 12px; }
+.brief-version-head h3 { margin: 0; font-size: 14px; }
+.brief-version-select { display: flex; align-items: center; gap: 12px; margin: 14px 0; }
+.brief-version-select select { min-width: 0; max-width: 100%; padding: 8px; border: 1px solid #ddd6eb; border-radius: 7px; color: #51486c; background: white; font: inherit; }
+.brief-version-comparison { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.brief-version-comparison > div { min-width: 0; padding: 12px; border: 1px solid #e6e1ef; border-radius: 8px; background: #fcfbfe; }
+.brief-version-comparison h4 { margin: 0 0 10px; color: #746497; font-size: 12px; }
+.brief-version-text { max-height: 340px; overflow: auto; overflow-wrap: anywhere; white-space: pre-wrap; font-size: 13px; line-height: 1.9; }
+.brief-version-text p { margin: 0 0 12px; }
+.brief-version-images { display: flex; gap: 6px; flex-wrap: wrap; }
+.brief-version-images img { width: 90px; height: 70px; object-fit: contain; }
+.brief-version-actions { margin-top: 12px; }
+.brief-version-actions p { color: #86808f; font-size: 11px; }
+.brief-version-actions button { flex-shrink: 0; }
+.brief-empty { padding: 70px 30px; text-align: center; color: #8e889b; }
+.brief-empty svg { color: var(--violet); }
+.brief-empty h2 { font-size: 18px; color: #56505f; }
+.brief-empty p { font-size: 13px; }
+@media (max-width: 1000px) { .brief-experience { grid-template-columns: 190px minmax(0, 1fr); } .brief-experience .brief-toolbar > span { display: none; } }
+@media (max-width: 760px) { .brief-experience { grid-template-columns: minmax(0, 1fr); } .brief-experience .brief-history { max-height: 220px; } .brief-version-comparison { grid-template-columns: minmax(0, 1fr); } .brief-notice, .brief-version-actions { align-items: flex-start; flex-wrap: wrap; } }

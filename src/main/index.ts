@@ -14,10 +14,13 @@ import {
 } from 'electron'
 import {
   AskWorkQuestionInputSchema,
+  ApplyDailyBriefVersionInputSchema,
   CaptureTextInputSchema,
   ExportRequestSchema,
   SaveProviderSettingsSchema,
   SearchInputSchema,
+  UpdateWorkItemInputSchema,
+  MergeWorkItemsInputSchema,
   UpdateDailyBriefInputSchema,
   UpdateSourceDateInputSchema,
   type ActionResult,
@@ -42,6 +45,7 @@ let analysis: AnalysisService | null = null
 let exporter: ExportService | null = null
 let closing = false
 let analysisQueue: Promise<void> = Promise.resolve()
+const sourceAnalysisTasks = new Map<string, Promise<void>>()
 const automaticAnalysisTimers = new Map<string, ReturnType<typeof setTimeout>>()
 const activeImportControllers = new Map<number, AbortController>()
 
@@ -204,6 +208,13 @@ function registerIpcHandlers(): void {
       const input = CaptureTextInputSchema.parse(rawInput)
       const source = await requireIngestion().captureText(input)
       broadcastDataChanged()
+      if (input.deferAnalysis) {
+        // Return the durable local record before any network-dependent work.
+        setImmediate(() => {
+          if (!closing) void analyzeSourceImmediatelyIfEnabled(source.id, event.sender)
+        })
+        return source
+      }
       await analyzeSourceImmediatelyIfEnabled(source.id, event.sender)
       return requireDatabase().getSource(source.id)
     })
@@ -340,6 +351,24 @@ function registerIpcHandlers(): void {
   )
 
   ipcMain.handle(
+    IPC.updateWorkItem,
+    guard((_event, rawInput) => {
+      const updated = requireDatabase().updateWorkItem(UpdateWorkItemInputSchema.parse(rawInput))
+      broadcastDataChanged()
+      return updated
+    })
+  )
+
+  ipcMain.handle(
+    IPC.mergeWorkItems,
+    guard((_event, rawInput) => {
+      const updated = requireDatabase().mergeWorkItems(MergeWorkItemsInputSchema.parse(rawInput))
+      broadcastDataChanged()
+      return updated
+    })
+  )
+
+  ipcMain.handle(
     IPC.updateSourceDate,
     guard(async (event, rawInput) => {
       const input = UpdateSourceDateInputSchema.parse(rawInput)
@@ -368,6 +397,29 @@ function registerIpcHandlers(): void {
     guard((_event, rawInput) => {
       const input = UpdateDailyBriefInputSchema.parse(rawInput)
       const updated = requireDatabase().updateDailyBrief(input)
+      broadcastDataChanged()
+      return updated
+    })
+  )
+
+  ipcMain.handle(
+    IPC.listDailyBriefVersions,
+    guard((_event, rawBriefId) => requireDatabase().listDailyBriefVersions(z.string().uuid().parse(rawBriefId)))
+  )
+
+  ipcMain.handle(
+    IPC.acceptDailyBriefVersion,
+    guard((_event, rawInput) => {
+      const updated = requireDatabase().acceptDailyBriefVersion(ApplyDailyBriefVersionInputSchema.parse(rawInput))
+      broadcastDataChanged()
+      return updated
+    })
+  )
+
+  ipcMain.handle(
+    IPC.restoreDailyBriefVersion,
+    guard((_event, rawInput) => {
+      const updated = requireDatabase().restoreDailyBriefVersion(ApplyDailyBriefVersionInputSchema.parse(rawInput))
       broadcastDataChanged()
       return updated
     })
@@ -510,13 +562,16 @@ async function runImport(
       if (!settings.connected) {
         result.analysisSkipped = '未连接 AI，资料已保存但未整理'
       } else {
-        for (const source of result.imported) {
+        for (const [index, source] of result.imported.entries()) {
           if (controller.signal.aborted) {
             result.cancelled = true
             break
           }
           try {
-            await enqueueSourceAnalysis(source.id, event.sender, controller.signal)
+            const report = (message: string): void => sendJobProgress(event.sender, source.id,
+              `原文已保存 · AI 整理 ${index + 1}/${result.imported.length} · ${message}`, 'import')
+            report('等待整理')
+            await enqueueSourceAnalysis(source.id, event.sender, controller.signal, report)
           } catch (error) {
             if (controller.signal.aborted) {
               result.cancelled = true
@@ -532,13 +587,23 @@ async function runImport(
       }
       result.imported = result.imported.map((source) => requireDatabase().getSource(source.id))
     }
-    const processed = result.imported.length + result.duplicates.length + result.failed.length
+    const importedIds = new Set(result.imported.map((source) => source.id))
+    const importFailures = result.failed.filter((failure) => !failure.sourceItemId || !importedIds.has(failure.sourceItemId))
+    const analysisFailures = result.failed.length - importFailures.length
+    const processed = result.imported.length + result.duplicates.length + importFailures.length
+    const completionDetails = [
+      `原文已保存 ${result.imported.length} 份`,
+      result.duplicates.length ? `重复跳过 ${result.duplicates.length} 份` : '',
+      importFailures.length ? `导入失败 ${importFailures.length} 份` : '',
+      analysisFailures ? `AI 整理失败 ${analysisFailures} 份，可重试` : ''
+    ].filter(Boolean).join('，')
     const message = result.cancelled
       ? '导入已取消，已完成的文件已保留'
       : result.analysisSkipped
         ? result.analysisSkipped
-      : `批量导入完成：新增 ${result.imported.length}，跳过 ${result.duplicates.length}，失败 ${result.failed.length}`
-    sendJobProgress(event.sender, '', message, 'import', processed, processed, true)
+      : `批量导入完成：${completionDetails}`
+    sendJobProgress(event.sender, '', message, 'import', processed, processed, true,
+      result.cancelled ? 'cancelled' : result.failed.length ? 'error' : result.analysisSkipped ? 'waiting' : 'success')
     return result
   } catch (error) {
     sendJobProgress(
@@ -548,7 +613,8 @@ async function runImport(
       'import',
       undefined,
       undefined,
-      true
+      true,
+      'error'
     )
     throw error
   } finally {
@@ -717,7 +783,7 @@ async function scheduleAutomaticAnalysis(
     const settings = await requireAnalysis().getProviderSettings()
     if (!settings.autoAnalyze) return
     if (!settings.connected) {
-      sendJobProgress(sender, '', '未连接 AI，已跳过自动整理', 'analysis', undefined, undefined, true)
+      sendJobProgress(sender, '', '未连接 AI，已跳过自动整理', 'analysis', undefined, undefined, true, 'waiting')
       return
     }
     const timerKey = `date:${workDate}`
@@ -757,7 +823,8 @@ async function analyzeSourceImmediatelyIfEnabled(
         'analysis',
         undefined,
         undefined,
-        true
+        true,
+        'waiting'
       )
       return
     }
@@ -783,13 +850,15 @@ function enqueueDailyAnalysis(
     const prefix = automatic ? '自动生成日报' : '重新生成日报'
     if (automatic && requireDatabase().listSourcesForDate(workDate).length === 0) {
       requireDatabase().clearDailySynthesisForDate(workDate)
-      sendJobProgress(sender, '', `${workDate} · 当天已无资料，旧日报已清除`, 'analysis', undefined, undefined, true)
+      sendJobProgress(sender, '', `${workDate} · 当天已无资料，已更新归档；人工稿会保留`, 'analysis', undefined, undefined, true)
       broadcastDataChanged()
       return
     }
     sendJobProgress(sender, '', `${workDate} · ${prefix}已开始`, 'analysis')
+    let announcedProcessing = false
     try {
       await requireAnalysis().analyzeWorkDate(workDate, (message) => {
+        if (!announcedProcessing) { announcedProcessing = true; broadcastDataChanged() }
         sendJobProgress(sender, '', `${workDate} · ${message}`, 'analysis')
       })
       sendJobProgress(sender, '', `${workDate} · 明日早会逐字稿已生成`, 'analysis', undefined, undefined, true)
@@ -801,7 +870,8 @@ function enqueueDailyAnalysis(
         'analysis',
         undefined,
         undefined,
-        true
+        true,
+        'error'
       )
       throw error
     } finally {
@@ -815,8 +885,11 @@ function enqueueDailyAnalysis(
 function enqueueSourceAnalysis(
   sourceItemId: string,
   sender: Electron.WebContents,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  onProgress?: (message: string) => void
 ): Promise<void> {
+  const existingTask = sourceAnalysisTasks.get(sourceItemId)
+  if (existingTask) return existingTask
   const task = analysisQueue.catch(() => undefined).then(async () => {
     let sourceTitle = '跨日期资料'
     try {
@@ -825,9 +898,13 @@ function enqueueSourceAnalysis(
       return
     }
     sendJobProgress(sender, sourceItemId, `${sourceTitle} · 正在识别各条工作的实际日期`, 'analysis')
+    onProgress?.(`${sourceTitle} · 正在识别工作日期`)
+    let announcedProcessing = false
     try {
       await requireAnalysis().analyzeSource(sourceItemId, (message) => {
+        if (!announcedProcessing) { announcedProcessing = true; broadcastDataChanged() }
         sendJobProgress(sender, sourceItemId, `${sourceTitle} · ${message}`, 'analysis')
+        onProgress?.(message)
       }, signal)
       sendJobProgress(sender, sourceItemId, `${sourceTitle} · 已按工作日期拆分并归档`, 'analysis', undefined, undefined, true)
     } catch (error) {
@@ -838,13 +915,16 @@ function enqueueSourceAnalysis(
         'analysis',
         undefined,
         undefined,
-        true
+        true,
+        signal?.aborted ? 'cancelled' : 'error'
       )
       throw error
     } finally {
       broadcastDataChanged()
     }
   })
+  sourceAnalysisTasks.set(sourceItemId, task)
+  void task.finally(() => { if (sourceAnalysisTasks.get(sourceItemId) === task) sourceAnalysisTasks.delete(sourceItemId) }).catch(() => undefined)
   analysisQueue = task.catch(() => undefined)
   return task
 }
@@ -856,10 +936,11 @@ function sendJobProgress(
   jobType: JobProgressEvent['jobType'],
   current?: number,
   total?: number,
-  finished?: boolean
+  finished?: boolean,
+  outcome?: JobProgressEvent['outcome']
 ): void {
   if (!sender.isDestroyed()) {
-    sender.send(IPC.jobProgress, { sourceItemId, message, jobType, current, total, finished })
+    sender.send(IPC.jobProgress, { sourceItemId, message, jobType, current, total, finished, outcome: outcome ?? (finished ? 'success' : undefined) })
   }
 }
 

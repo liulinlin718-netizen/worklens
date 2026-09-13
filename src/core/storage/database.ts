@@ -3,15 +3,18 @@ import { dirname } from 'node:path'
 import { DatabaseSync, type StatementResultingChanges } from 'node:sqlite'
 import type {
   AiProposal,
+  ApplyDailyBriefVersionInput,
   AnalysisResult,
   AppSnapshot,
   Asset,
   DailyBrief,
+  DailyBriefVersion,
   DashboardData,
   DateOrigin,
   DatePrecision,
   EvidenceLink,
   KnowledgeContextItem,
+  MergeWorkItemsInput,
   ProcessingStatus,
   ProviderSettings,
   Requirement,
@@ -22,6 +25,7 @@ import type {
   SourceKind,
   Summary,
   UpdateDailyBriefInput,
+  UpdateWorkItemInput,
   WorkEvent,
   WorkItem
 } from '@shared/contracts'
@@ -35,11 +39,13 @@ import {
   normalizeRequirementStatus,
   nowIso
 } from '@core/domain'
+import { getWorkItemReviewReasons, isWorkItemFragmentTitle, normalizeWorkItemCategory } from '@shared/work-item-quality'
 
 type Row = Record<string, unknown>
 
 const INTERRUPTED_JOB_MESSAGE = '上次整理因应用退出而中断，可重新整理'
 const INTERRUPTED_JOB_ERROR = '任务在完成前被中断'
+const MIN_PROTECTED_QUOTE_LENGTH = 10
 const LEGACY_CURSOR_PROVIDER_MESSAGE =
   'Cursor API 已移除，请连接本机 Cursor、Codex 或外部 API'
 
@@ -364,6 +370,7 @@ export class WorkLensDatabase {
     `)
 
     this.migrateLegacyCursorProviderSettings()
+    this.migrateContentProtection()
 
     try {
       this.db.exec(`
@@ -388,6 +395,77 @@ export class WorkLensDatabase {
     }
 
     this.recoverInterruptedWork()
+  }
+
+  private migrateContentProtection(): void {
+    this.transaction(() => {
+      const columns = this.db.prepare('PRAGMA table_info(daily_briefs)').all() as Row[]
+      for (const [name, definition] of [
+        ['manual_locked', 'INTEGER NOT NULL DEFAULT 0'],
+        ['current_version_id', 'TEXT'],
+        ['pending_ai_version_id', 'TEXT']
+      ]) {
+        if (!columns.some((column) => String(column.name) === name)) {
+          this.db.exec(`ALTER TABLE daily_briefs ADD COLUMN ${name} ${definition}`)
+        }
+      }
+      this.db.exec(`
+        CREATE TABLE IF NOT EXISTS daily_brief_versions (
+          id TEXT PRIMARY KEY,
+          brief_id TEXT NOT NULL,
+          work_date TEXT NOT NULL,
+          kind TEXT NOT NULL,
+          payload_json TEXT NOT NULL,
+          created_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_brief_versions ON daily_brief_versions(brief_id, created_at DESC);
+        CREATE TABLE IF NOT EXISTS work_item_aliases (
+          alias_key TEXT PRIMARY KEY,
+          canonical_key TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS work_item_overrides (
+          work_item_key TEXT PRIMARY KEY,
+          title TEXT NOT NULL,
+          event_type TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS work_item_evidence_overrides (
+          source_item_id TEXT NOT NULL REFERENCES source_items(id) ON DELETE CASCADE,
+          quote_key TEXT NOT NULL,
+          canonical_key TEXT NOT NULL,
+          PRIMARY KEY(source_item_id, quote_key, canonical_key)
+        );
+      `)
+      if (!this.db.prepare('SELECT 1 FROM schema_migrations WHERE version = 7').get()) {
+        for (const row of this.db.prepare('SELECT work_item_key FROM work_item_overrides').all() as Row[]) {
+          this.rememberWorkItemEvidence(this.resolveWorkItemKey(String(row.work_item_key)))
+        }
+        this.db.exec("INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (7, datetime('now'))")
+      }
+      const applied = this.db.prepare('SELECT 1 FROM schema_migrations WHERE version = 6').get()
+      if (applied) return
+      for (const row of this.db.prepare('SELECT * FROM daily_briefs').all() as Row[]) {
+        const current = mapDailyBrief(row)
+        const revisions = this.db.prepare("SELECT * FROM revisions WHERE entity_type = 'brief' AND entity_id = ? AND actor = 'user' ORDER BY created_at, rowid").all(current.id) as Row[]
+        const historicalVersions = new Map<string, string>()
+        for (const revision of revisions) {
+          for (const [field, kind] of [['before_json', 'ai'], ['after_json', 'manual']] as const) {
+            const saved = parseRecord(String(revision[field] ?? '{}'))
+            if (typeof saved.script !== 'string') continue
+            const version = { ...current, ...saved, images: Array.isArray(saved.images) ? saved.images : [] } as DailyBrief
+            const key = briefContentKey(version)
+            if (!historicalVersions.has(key)) {
+              historicalVersions.set(key, this.recordBriefVersion(version, kind, String(revision.created_at)))
+            }
+          }
+        }
+        current.manualLocked = revisions.length > 0
+        const versionId = historicalVersions.get(briefContentKey(current)) ?? this.recordBriefVersion(current, current.manualLocked ? 'manual' : 'ai', current.updatedAt)
+        this.db.prepare('UPDATE daily_briefs SET manual_locked = ?, current_version_id = ? WHERE id = ?').run(current.manualLocked ? 1 : 0, versionId, current.id)
+      }
+      this.db.exec("INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (6, datetime('now'))")
+    })
   }
 
   private migrateLegacyCursorProviderSettings(): void {
@@ -787,12 +865,17 @@ export class WorkLensDatabase {
     if (source.businessDate) affectedWorkDates.add(source.businessDate)
     this.transaction(() => {
       this.removeGeneratedEventContributions([sourceItemId], affectedWorkDates)
-      const briefs = this.db.prepare('SELECT id, work_date, source_item_ids_json FROM daily_briefs').all() as Row[]
+      const briefs = this.db.prepare('SELECT id, work_date, source_item_ids_json, manual_locked FROM daily_briefs').all() as Row[]
       for (const brief of briefs) {
         const sourceIds = parseStringArray(String(brief.source_item_ids_json))
         if (!sourceIds.includes(sourceItemId)) continue
         const id = String(brief.id)
         affectedWorkDates.add(String(brief.work_date))
+        if (Number(brief.manual_locked) === 1) {
+          this.db.prepare('UPDATE daily_briefs SET source_item_ids_json = ? WHERE id = ?')
+            .run(JSON.stringify(sourceIds.filter((sourceId) => sourceId !== sourceItemId)), id)
+          continue
+        }
         this.db.prepare("DELETE FROM search_index WHERE entity_type = 'brief' AND entity_id = ?").run(id)
         this.db.prepare('DELETE FROM daily_briefs WHERE id = ?').run(id)
       }
@@ -830,30 +913,128 @@ export class WorkLensDatabase {
   }
 
   deleteWorkItem(workItemKey: string): DeleteWorkContentRecord {
-    const rows = this.db
-      .prepare(`
-        SELECT id, COALESCE(NULLIF(work_item_title, ''), title) AS title
-        FROM events
-        WHERE work_item_key = ?
-        ORDER BY COALESCE(event_date, created_at) DESC, updated_at DESC
-      `)
-      .all(workItemKey) as Row[]
-    if (!rows.length) throw new Error('这个工作事项不存在或已被删除')
+    const item = this.listWorkItems().find((item) => item.key === this.resolveWorkItemKey(workItemKey))
+    if (!item) throw new Error('这个工作事项不存在或已被删除')
+    const title = item.manualEdited ? item.title : this.listEvents().find((event) => event.id === item.eventIds[0])?.workItemTitle ?? item.title
     this.transaction(() => {
-      for (const row of rows) this.deleteEventRow(String(row.id))
+      for (const eventId of item.eventIds) this.deleteEventRow(eventId)
     })
-    return { title: String(rows[0]!.title), deletedCount: rows.length }
+    return { title, deletedCount: item.eventCount }
+  }
+
+  private resolveWorkItemKey(key: string): string {
+    const seen = new Set<string>()
+    let current = key
+    while (!seen.has(current)) {
+      seen.add(current)
+      const row = this.db.prepare('SELECT canonical_key FROM work_item_aliases WHERE alias_key = ?').get(current) as Row | undefined
+      if (!row) return current
+      current = String(row.canonical_key)
+    }
+    return current
+  }
+
+  updateWorkItem(input: UpdateWorkItemInput): WorkItem {
+    const key = this.resolveWorkItemKey(input.workItemKey)
+    const before = this.listWorkItems().find((item) => item.key === key)
+    if (!before) throw new Error('这个工作事项不存在或已被删除')
+    this.transaction(() => {
+      this.saveWorkItemOverride(key, input.title, input.eventType)
+      this.rememberWorkItemEvidence(key)
+      this.addRevision('work_item', key, 'user', before, { ...before, title: input.title, eventType: normalizeWorkItemCategory(input.eventType) })
+      this.refreshWorkItemSearch(key)
+    })
+    return this.listWorkItems().find((item) => item.key === key)!
+  }
+
+  mergeWorkItems(input: MergeWorkItemsInput): WorkItem {
+    const sourceKey = this.resolveWorkItemKey(input.sourceWorkItemKey)
+    const targetKey = this.resolveWorkItemKey(input.targetWorkItemKey)
+    if (sourceKey === targetKey) throw new Error('请选择另一个工作事项进行合并')
+    const items = this.listWorkItems()
+    const source = items.find((item) => item.key === sourceKey)
+    const target = items.find((item) => item.key === targetKey)
+    if (!source || !target) throw new Error('要合并的工作事项不存在或已被删除')
+    this.transaction(() => {
+      this.db.prepare(`INSERT INTO work_item_aliases(alias_key, canonical_key, updated_at) VALUES (?, ?, ?)
+        ON CONFLICT(alias_key) DO UPDATE SET canonical_key = excluded.canonical_key, updated_at = excluded.updated_at`).run(sourceKey, targetKey, nowIso())
+      this.saveWorkItemOverride(targetKey, target.title, target.eventType)
+      this.rememberWorkItemEvidence(targetKey)
+      this.addRevision('work_item', targetKey, 'user', { source, target }, { mergedFrom: sourceKey, targetKey })
+      this.refreshWorkItemSearch(targetKey)
+    })
+    return this.listWorkItems().find((item) => item.key === targetKey)!
+  }
+
+  private saveWorkItemOverride(key: string, title: string, eventType: string): void {
+    this.db.prepare(`INSERT INTO work_item_overrides(work_item_key, title, event_type, updated_at) VALUES (?, ?, ?, ?)
+      ON CONFLICT(work_item_key) DO UPDATE SET title = excluded.title, event_type = excluded.event_type, updated_at = excluded.updated_at`)
+      .run(key, title.trim(), normalizeWorkItemCategory(eventType), nowIso())
+  }
+
+  private refreshWorkItemSearch(key: string): void {
+    for (const event of this.listEvents().filter((event) => event.workItemKey === key)) {
+      this.upsertSearch('event', event.id, `${event.workItemTitle} ${event.title}`, `${event.eventType}\n${event.summary}`)
+    }
+  }
+
+  private rememberWorkItemEvidence(key: string): void {
+    const statement = this.db.prepare('INSERT OR IGNORE INTO work_item_evidence_overrides(source_item_id, quote_key, canonical_key) VALUES (?, ?, ?)')
+    for (const event of this.listEvents().filter((event) => event.workItemKey === key)) {
+      for (const evidence of event.evidence) {
+        const quoteKey = normalizeEntityKey(evidence.quote)
+        if (quoteKey) statement.run(evidence.sourceItemId, quoteKey, key)
+      }
+    }
+  }
+
+  private protectedWorkItemEvent(event: AnalysisResult['events'][number], sourceItemIds: string[]): AnalysisResult['events'][number] {
+    const matches = new Set<string>()
+    const quotations: Array<{ sourceId: string; quoteKey: string }> = []
+    for (const evidence of event.evidence) {
+      const quoteKey = normalizeEntityKey(evidence.quote)
+      if (!quoteKey) continue
+      const sourceId = this.resolveEvidenceSourceId(sourceItemIds, evidence)
+      quotations.push({ sourceId, quoteKey })
+      const rows = this.db.prepare('SELECT canonical_key FROM work_item_evidence_overrides WHERE source_item_id = ? AND quote_key = ?').all(sourceId, quoteKey) as Row[]
+      for (const row of rows) matches.add(this.resolveWorkItemKey(String(row.canonical_key)))
+    }
+    // Prefer exact provenance. Only when none exists may a sufficiently long
+    // quotation carry the same choice across AI shortening/expansion. Both
+    // quotations must come from the same source, and containment must be strict.
+    if (!matches.size) {
+      for (const { sourceId, quoteKey } of quotations) {
+        if (Array.from(quoteKey).length < MIN_PROTECTED_QUOTE_LENGTH) continue
+        const rows = this.db.prepare('SELECT quote_key, canonical_key FROM work_item_evidence_overrides WHERE source_item_id = ?').all(sourceId) as Row[]
+        for (const row of rows) {
+          const savedQuoteKey = String(row.quote_key)
+          if (Array.from(savedQuoteKey).length < MIN_PROTECTED_QUOTE_LENGTH || savedQuoteKey === quoteKey) continue
+          if (savedQuoteKey.includes(quoteKey) || quoteKey.includes(savedQuoteKey)) {
+            matches.add(this.resolveWorkItemKey(String(row.canonical_key)))
+          }
+        }
+      }
+    }
+    // The same quotation can legitimately discuss two manually separated items.
+    // Ambiguous exact or contained quotations must never manufacture a merge.
+    if (matches.size !== 1) return event
+    return { ...event, workItemKey: matches.values().next().value! }
   }
 
   listEvents(): WorkEvent[] {
     const rows = this.db.prepare('SELECT * FROM events ORDER BY event_date DESC, rowid ASC').all() as Row[]
-    return rows.map((row) =>
-      mapEvent(
+    return rows.map((row) => {
+      const event = mapEvent(
         row,
         this.listEvidence('event', String(row.id)),
         this.listRelatedIds('event', String(row.id), 'requirement')
       )
-    )
+      event.workItemKey = this.resolveWorkItemKey(event.workItemKey || deriveWorkItemKey(event.workItemTitle || event.title))
+      const override = this.db.prepare('SELECT * FROM work_item_overrides WHERE work_item_key = ?').get(event.workItemKey) as Row | undefined
+      event.workItemTitle = override ? String(override.title) : event.workItemTitle
+      event.eventType = normalizeWorkItemCategory(override ? String(override.event_type) : event.eventType)
+      return event
+    })
   }
 
   listWorkItems(events: readonly WorkEvent[] = this.listEvents()): WorkItem[] {
@@ -868,25 +1049,33 @@ export class WorkLensDatabase {
         b.updatedAt.localeCompare(a.updatedAt)
       )
       const latest = ordered[0]!
+      const override = this.db.prepare('SELECT * FROM work_item_overrides WHERE work_item_key = ?').get(key) as Row | undefined
       const dated = ordered.map((event) => event.eventDate).filter((date): date is string => Boolean(date)).sort()
       const evidence = Array.from(
         new Map(ordered.flatMap((event) => event.evidence).map((item) => [`${item.sourceItemId}:${item.quote}`, item])).values()
       )
-      return {
+      const item: WorkItem = {
         id: key,
         key,
-        title: selectStableWorkItemTitle(ordered),
+        title: override ? String(override.title) : selectStableWorkItemTitle(ordered),
         eventType: latest.eventType,
         firstDate: dated[0] ?? null,
         latestDate: dated.at(-1) ?? null,
         summary: latest.summary,
         confidence: Math.max(...ordered.map((event) => event.confidence)),
         evidence,
-        sourceItemIds: Array.from(new Set(evidence.map((item) => item.sourceItemId))),
+        sourceItemIds: Array.from(new Set([...evidence.map((item) => item.sourceItemId), ...ordered.map((event) => event.sourceItemId)])),
         eventIds: ordered.map((event) => event.id),
         eventCount: ordered.length,
-        updatedAt: ordered.map((event) => event.updatedAt).sort().at(-1) ?? latest.updatedAt
+        updatedAt: [...ordered.map((event) => event.updatedAt), ...(override ? [String(override.updated_at)] : [])].sort().at(-1) ?? latest.updatedAt,
+        manualEdited: Boolean(override)
       }
+      item.reviewReasons = getWorkItemReviewReasons(item)
+      if (item.confidence >= 0.7 && ordered.some((event) => event.confidence < 0.7)) {
+        item.reviewReasons.push('部分历史记录的 AI 把握较低，请展开后核对原文')
+      }
+      item.isFragment = isWorkItemFragmentTitle(item.title)
+      return item
     }).sort((a, b) => (b.latestDate ?? b.updatedAt).localeCompare(a.latestDate ?? a.updatedAt))
   }
 
@@ -927,20 +1116,100 @@ export class WorkLensDatabase {
   }
 
   updateDailyBrief(input: UpdateDailyBriefInput): DailyBrief {
-    const row = this.db
-      .prepare('SELECT * FROM daily_briefs WHERE id = ?')
-      .get(input.briefId) as Row | undefined
-    if (!row) throw new Error('找不到要修改的逐字稿')
-    const before = mapDailyBrief(row)
-    const updatedAt = nowIso()
+    const before = this.requireBrief(input.briefId, input.expectedUpdatedAt)
+    const updatedAt = nextBriefTimestamp(before.updatedAt)
+    const updated: DailyBrief = { ...before, script: input.script, images: input.images, manualLocked: true, updatedAt }
     this.transaction(() => {
-      this.db
-        .prepare('UPDATE daily_briefs SET script = ?, images_json = ?, updated_at = ? WHERE id = ?')
-        .run(input.script, JSON.stringify(input.images), updatedAt, input.briefId)
-      this.addRevision('brief', input.briefId, 'user', before, { ...before, script: input.script, images: input.images, updatedAt })
-      this.upsertSearch('brief', input.briefId, before.title, [before.overview, input.script, ...before.completed, ...before.inProgress, ...before.nextSteps].join('\n'))
+      const versionId = this.recordBriefVersion(updated, 'manual')
+      this.writeBrief(updated, versionId)
+      this.addRevision('brief', input.briefId, 'user', before, updated)
     })
     return this.getDailyBrief(before.workDate)!
+  }
+
+  listDailyBriefVersions(briefId: string): DailyBriefVersion[] {
+    this.requireBrief(briefId)
+    const current = this.db.prepare('SELECT current_version_id FROM daily_briefs WHERE id = ?').get(briefId) as Row
+    return (this.db.prepare('SELECT * FROM daily_brief_versions WHERE brief_id = ? ORDER BY created_at DESC, rowid DESC').all(briefId) as Row[]).map((row) => ({
+      ...parseRecord(String(row.payload_json)) as unknown as DailyBrief,
+      versionId: String(row.id),
+      kind: String(row.kind) as DailyBriefVersion['kind'],
+      savedAt: String(row.created_at),
+      isCurrent: String(row.id) === current.current_version_id
+    }))
+  }
+
+  acceptDailyBriefVersion(input: ApplyDailyBriefVersionInput): DailyBrief {
+    return this.applyBriefVersion(input, 'manual')
+  }
+
+  restoreDailyBriefVersion(input: ApplyDailyBriefVersionInput): DailyBrief {
+    return this.applyBriefVersion(input, 'restore')
+  }
+
+  private applyBriefVersion(input: ApplyDailyBriefVersionInput, kind: 'manual' | 'restore'): DailyBrief {
+    const before = this.requireBrief(input.briefId, input.expectedUpdatedAt)
+    const row = this.db.prepare('SELECT * FROM daily_brief_versions WHERE id = ? AND brief_id = ?').get(input.versionId, input.briefId) as Row | undefined
+    if (!row) throw new Error('找不到这个早会稿版本，请刷新后重试')
+    if (kind === 'manual' && row.kind !== 'ai') throw new Error('请选择一个 AI 版本进行采用')
+    const saved = parseRecord(String(row.payload_json)) as unknown as DailyBrief
+    const updated: DailyBrief = {
+      ...saved,
+      id: before.id,
+      workDate: before.workDate,
+      createdAt: before.createdAt,
+      updatedAt: nextBriefTimestamp(before.updatedAt),
+      manualLocked: true,
+      pendingAiVersionId: before.pendingAiVersionId === input.versionId ? null : before.pendingAiVersionId
+    }
+    // Keep original provenance in the archived version, but never link the active
+    // draft back to a source the user has since deleted.
+    updated.sourceItemIds = updated.sourceItemIds.filter((sourceId) => Boolean(this.db.prepare('SELECT 1 FROM source_items WHERE id = ?').get(sourceId)))
+    this.transaction(() => {
+      const versionId = this.recordBriefVersion(updated, kind)
+      this.writeBrief(updated, versionId)
+      this.addRevision('brief', before.id, 'user', before, updated)
+    })
+    return this.getDailyBrief(before.workDate)!
+  }
+
+  private requireBrief(briefId: string, expectedUpdatedAt?: string): DailyBrief {
+    const row = this.db.prepare('SELECT * FROM daily_briefs WHERE id = ?').get(briefId) as Row | undefined
+    if (!row) throw new Error('找不到要修改的逐字稿')
+    const brief = mapDailyBrief(row)
+    if (expectedUpdatedAt !== undefined && expectedUpdatedAt !== brief.updatedAt) {
+      throw new Error('早会稿已有更新，当前修改尚未覆盖；请先查看最新版本后再保存')
+    }
+    return brief
+  }
+
+  private recordBriefVersion(brief: DailyBrief, kind: DailyBriefVersion['kind'], savedAt = nowIso()): string {
+    const id = newId()
+    this.db.prepare('INSERT INTO daily_brief_versions(id, brief_id, work_date, kind, payload_json, created_at) VALUES (?, ?, ?, ?, ?, ?)')
+      .run(id, brief.id, brief.workDate, kind, JSON.stringify(brief), savedAt)
+    return id
+  }
+
+  private writeBrief(brief: DailyBrief, versionId: string): void {
+    this.db.prepare(`
+      INSERT INTO daily_briefs(
+        id, work_date, standup_date, title, overview, script, completed_json, in_progress_json,
+        blockers_json, next_steps_json, images_json, source_item_ids_json, provider, model,
+        created_at, updated_at, manual_locked, current_version_id, pending_ai_version_id
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(work_date) DO UPDATE SET
+        standup_date = excluded.standup_date, title = excluded.title, overview = excluded.overview,
+        script = excluded.script, completed_json = excluded.completed_json, in_progress_json = excluded.in_progress_json,
+        blockers_json = excluded.blockers_json, next_steps_json = excluded.next_steps_json, images_json = excluded.images_json,
+        source_item_ids_json = excluded.source_item_ids_json, provider = excluded.provider, model = excluded.model,
+        updated_at = excluded.updated_at, manual_locked = excluded.manual_locked, current_version_id = excluded.current_version_id,
+        pending_ai_version_id = excluded.pending_ai_version_id
+    `).run(brief.id, brief.workDate, brief.standupDate, brief.title, brief.overview, brief.script,
+      JSON.stringify(brief.completed), JSON.stringify(brief.inProgress), JSON.stringify(brief.blockers), JSON.stringify(brief.nextSteps),
+      JSON.stringify(brief.images ?? []), JSON.stringify(brief.sourceItemIds), brief.provider, brief.model, brief.createdAt, brief.updatedAt,
+      brief.manualLocked ? 1 : 0, versionId, brief.pendingAiVersionId ?? null)
+    this.upsertSearch('brief', brief.id, brief.title,
+      [brief.overview, brief.script, ...brief.completed, ...brief.inProgress, ...brief.blockers, ...brief.nextSteps].join('\n'))
   }
 
   saveDailySynthesis(
@@ -962,7 +1231,8 @@ export class WorkLensDatabase {
     this.transaction(() => {
       this.removeGeneratedEventContributions(uniqueSourceIds)
       const representativeEventsByDate = new Map<string, AnalysisResult['events'][number]>()
-      for (const event of result.events) {
+      for (const generatedEvent of result.events) {
+        const event = this.protectedWorkItemEvent(generatedEvent, uniqueSourceIds)
         if (event.eventDate && !representativeEventsByDate.has(event.eventDate)) {
           representativeEventsByDate.set(event.eventDate, event)
         }
@@ -1028,65 +1298,28 @@ export class WorkLensDatabase {
     provider: string,
     model: string
   ): void {
-    const existing = this.db
-      .prepare('SELECT id, created_at FROM daily_briefs WHERE work_date = ?')
-      .get(brief.workDate) as Row | undefined
-    const id = existing ? String(existing.id) : newId()
-    const createdAt = existing ? String(existing.created_at) : nowIso()
-    const updatedAt = nowIso()
-    this.db
-      .prepare(`
-        INSERT INTO daily_briefs(
-          id, work_date, standup_date, title, overview, script,
-          completed_json, in_progress_json, blockers_json, next_steps_json,
-          source_item_ids_json, provider, model, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(work_date) DO UPDATE SET
-          standup_date = excluded.standup_date,
-          title = excluded.title,
-          overview = excluded.overview,
-          script = excluded.script,
-          completed_json = excluded.completed_json,
-          in_progress_json = excluded.in_progress_json,
-          blockers_json = excluded.blockers_json,
-          next_steps_json = excluded.next_steps_json,
-          source_item_ids_json = excluded.source_item_ids_json,
-          provider = excluded.provider,
-          model = excluded.model,
-          updated_at = excluded.updated_at
-      `)
-      .run(
-        id,
-        brief.workDate,
-        nextWorkday(brief.workDate),
-        brief.title,
-        brief.overview,
-        brief.script,
-        JSON.stringify(brief.completed),
-        JSON.stringify(brief.inProgress),
-        JSON.stringify(brief.blockers),
-        JSON.stringify(brief.nextSteps),
-        JSON.stringify(sourceItemIds),
-        provider,
-        model,
-        createdAt,
-        updatedAt
-      )
-    this.upsertSearch(
-      'brief',
-      id,
-      brief.title,
-      [brief.overview, brief.script, ...brief.completed, ...brief.inProgress, ...brief.blockers, ...brief.nextSteps].join('\n')
-    )
+    const existing = this.getDailyBrief(brief.workDate)
+    const candidate: DailyBrief = {
+      ...brief, id: existing?.id ?? newId(), standupDate: nextWorkday(brief.workDate),
+      sourceItemIds, provider, model, images: existing?.images ?? [],
+      createdAt: existing?.createdAt ?? nowIso(), updatedAt: nextBriefTimestamp(existing?.updatedAt),
+      manualLocked: false, pendingAiVersionId: null
+    }
+    const versionId = this.recordBriefVersion(candidate, 'ai')
+    if (existing?.manualLocked) {
+      this.db.prepare('UPDATE daily_briefs SET pending_ai_version_id = ? WHERE id = ?').run(versionId, existing.id)
+    } else {
+      this.writeBrief(candidate, versionId)
+    }
   }
 
   clearDailySynthesisForDate(workDate: string): void {
     this.transaction(() => {
       this.removeGeneratedEventsForDate(workDate)
       const row = this.db
-        .prepare('SELECT id FROM daily_briefs WHERE work_date = ?')
+        .prepare('SELECT id, manual_locked FROM daily_briefs WHERE work_date = ?')
         .get(workDate) as Row | undefined
-      if (row) {
+      if (row && Number(row.manual_locked) !== 1) {
         this.db
           .prepare("DELETE FROM search_index WHERE entity_type = 'brief' AND entity_id = ?")
           .run(String(row.id))
@@ -1351,7 +1584,7 @@ export class WorkLensDatabase {
     }
     const eventRows = this.db
       .prepare(`
-        SELECT id, title, event_type, event_date, summary, created_at
+        SELECT id, title, work_item_key, work_item_title, event_type, event_date, summary, created_at
         FROM events
         ORDER BY COALESCE(event_date, substr(created_at, 1, 10)) DESC, created_at DESC
         LIMIT 2000
@@ -1359,13 +1592,17 @@ export class WorkLensDatabase {
       .all() as Row[]
     for (const row of eventRows) {
       const id = String(row.id)
+      const canonicalKey = this.resolveWorkItemKey(String(row.work_item_key))
+      const override = this.db.prepare('SELECT title, event_type FROM work_item_overrides WHERE work_item_key = ?').get(canonicalKey) as Row | undefined
+      const workItemTitle = override ? String(override.title) : String(row.work_item_title)
+      const eventType = normalizeWorkItemCategory(override ? String(override.event_type) : String(row.event_type))
       candidates.push({
         refId: `event:${id}`,
         entityType: 'event',
         entityId: id,
-        title: String(row.title),
+        title: workItemTitle === row.title ? String(row.title) : `${workItemTitle} · ${String(row.title)}`,
         date: row.event_date ? String(row.event_date).slice(0, 10) : null,
-        content: `${String(row.event_type)}：${String(row.summary)}`
+        content: `${eventType}：${String(row.summary)}`
       })
     }
 
@@ -1547,7 +1784,7 @@ export class WorkLensDatabase {
             id
           )
       }
-      this.upsertSearch('event', id, title, summary)
+      this.indexWorkEvent(id, workItemKey, workItemTitle, title, summary)
       return id
     }
 
@@ -1586,8 +1823,14 @@ export class WorkLensDatabase {
         time,
         time
       )
-    this.upsertSearch('event', id, title, summary)
+    this.indexWorkEvent(id, workItemKey, workItemTitle, title, summary)
     return id
+  }
+
+  private indexWorkEvent(id: string, key: string, workItemTitle: string, title: string, summary: string): void {
+    const canonicalKey = this.resolveWorkItemKey(key)
+    const override = this.db.prepare('SELECT title FROM work_item_overrides WHERE work_item_key = ?').get(canonicalKey) as Row | undefined
+    this.upsertSearch('event', id, `${override ? String(override.title) : workItemTitle} ${title}`, summary)
   }
 
   private hasSourceEventForDate(sourceItemIds: string[], eventDate: string): boolean {
@@ -2219,8 +2462,19 @@ function mapDailyBrief(row: Row): DailyBrief {
     provider: String(row.provider),
     model: String(row.model),
     createdAt: String(row.created_at),
-    updatedAt: String(row.updated_at)
+    updatedAt: String(row.updated_at),
+    manualLocked: Number(row.manual_locked) === 1,
+    pendingAiVersionId: nullableString(row.pending_ai_version_id)
   }
+}
+
+function nextBriefTimestamp(previous?: string): string {
+  return new Date(Math.max(Date.now(), previous ? Date.parse(previous) + 1 : 0)).toISOString()
+}
+
+function briefContentKey(brief: DailyBrief): string {
+  return JSON.stringify([brief.title, brief.overview, brief.script, brief.completed, brief.inProgress,
+    brief.blockers, brief.nextSteps, brief.images ?? [], brief.sourceItemIds, brief.provider, brief.model])
 }
 
 function mapProposal(row: Row): AiProposal {

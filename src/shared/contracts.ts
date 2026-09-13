@@ -116,6 +116,9 @@ export interface WorkItem {
   eventIds: string[]
   eventCount: number
   updatedAt: string
+  reviewReasons?: string[]
+  isFragment?: boolean
+  manualEdited?: boolean
 }
 
 export interface Requirement {
@@ -169,6 +172,15 @@ export interface DailyBrief {
   model: string
   createdAt: string
   updatedAt: string
+  manualLocked?: boolean
+  pendingAiVersionId?: string | null
+}
+
+export interface DailyBriefVersion extends DailyBrief {
+  versionId: string
+  kind: 'ai' | 'manual' | 'restore'
+  savedAt: string
+  isCurrent: boolean
 }
 
 export interface AiProposal {
@@ -274,7 +286,8 @@ export interface AppSnapshot {
 export const CaptureTextInputSchema = z.object({
   title: z.string().trim().max(160).optional().default(''),
   text: z.string().trim().min(1).max(500_000),
-  businessDate: z.iso.date().nullable().optional().default(null)
+  businessDate: z.iso.date().nullable().optional().default(null),
+  deferAnalysis: z.boolean().optional()
 })
 export type CaptureTextInput = z.infer<typeof CaptureTextInputSchema>
 
@@ -293,9 +306,30 @@ export const DailyBriefImageSchema = z.object({
 export const UpdateDailyBriefInputSchema = z.object({
   briefId: z.string().uuid(),
   script: z.string().trim().min(1).max(50_000),
-  images: z.array(DailyBriefImageSchema).max(6).default([])
+  images: z.array(DailyBriefImageSchema).max(6).default([]),
+  expectedUpdatedAt: z.string().optional()
 })
 export type UpdateDailyBriefInput = z.infer<typeof UpdateDailyBriefInputSchema>
+
+export const ApplyDailyBriefVersionInputSchema = z.object({
+  briefId: z.string().uuid(),
+  versionId: z.string().uuid(),
+  expectedUpdatedAt: z.string().optional()
+})
+export type ApplyDailyBriefVersionInput = z.infer<typeof ApplyDailyBriefVersionInputSchema>
+
+export const UpdateWorkItemInputSchema = z.object({
+  workItemKey: z.string().trim().min(1).max(500),
+  title: z.string().trim().min(1).max(200),
+  eventType: z.string().trim().min(1).max(80)
+})
+export type UpdateWorkItemInput = z.infer<typeof UpdateWorkItemInputSchema>
+
+export const MergeWorkItemsInputSchema = z.object({
+  sourceWorkItemKey: z.string().trim().min(1).max(500),
+  targetWorkItemKey: z.string().trim().min(1).max(500)
+})
+export type MergeWorkItemsInput = z.infer<typeof MergeWorkItemsInputSchema>
 
 export const AnalyzeSourceInputSchema = z.object({
   sourceItemId: z.string().uuid()
@@ -442,6 +476,7 @@ export interface JobProgressEvent {
   current?: number
   total?: number
   finished?: boolean
+  outcome?: 'success' | 'error' | 'waiting' | 'cancelled'
 }
 
 export interface ActionResult {
@@ -464,9 +499,14 @@ export interface WorkLensApi {
   deleteSource(sourceItemId: string): Promise<ActionResult>
   deleteWorkEvent(eventId: string): Promise<ActionResult>
   deleteWorkItem(workItemKey: string): Promise<ActionResult>
+  updateWorkItem(input: UpdateWorkItemInput): Promise<WorkItem>
+  mergeWorkItems(input: MergeWorkItemsInput): Promise<WorkItem>
   updateSourceDate(input: UpdateSourceDateInput): Promise<SourceItem>
   generateDailyBrief(workDate: string): Promise<ActionResult>
   updateDailyBrief(input: UpdateDailyBriefInput): Promise<DailyBrief>
+  listDailyBriefVersions(briefId: string): Promise<DailyBriefVersion[]>
+  acceptDailyBriefVersion(input: ApplyDailyBriefVersionInput): Promise<DailyBrief>
+  restoreDailyBriefVersion(input: ApplyDailyBriefVersionInput): Promise<DailyBrief>
   askWorkQuestion(input: AskWorkQuestionInput): Promise<WorkQuestionAnswer>
   search(input: SearchInput): Promise<SearchHit[]>
   exportData(input: ExportRequest): Promise<ActionResult>

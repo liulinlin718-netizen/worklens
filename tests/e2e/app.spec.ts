@@ -6,7 +6,7 @@ import { ZipArchive } from 'archiver'
 import { PDFDocument, createCanvas, loadImage } from '@napi-rs/canvas'
 import { _electron as electron, expect, test } from '@playwright/test'
 
-test('keeps daily capture separate and archives a mixed-day batch by content date', async () => {
+test('keeps daily capture separate and archives a mixed-day batch by content date', async ({}, testInfo) => {
   test.setTimeout(90_000)
   const userData = mkdtempSync(join(tmpdir(), 'worklens-e2e-'))
   const julyPath = join(userData, 'july-work.txt')
@@ -58,8 +58,9 @@ test('keeps daily capture separate and archives a mixed-day batch by content dat
     await window
       .getByPlaceholder(/^例如：/)
       .fill('2026年8月30日完成未连接 AI 拦截验证。')
-    await window.getByRole('button', { name: '保存并自动整理' }).click()
-    await expect(window.getByText('未连接 AI，工作内容已保存但未整理')).toBeVisible()
+    await expect(window.getByText('AI 尚未连接，仍可先保存工作记录')).toBeVisible()
+    await window.getByRole('button', { name: '保存记录', exact: true }).click()
+    await expect(window.getByText('原文已保存，可在下方继续整理')).toBeVisible()
     const disconnectedResult = await window.evaluate(async () => {
       const snapshot = await globalThis.window.worklens.getSnapshot()
       const source = snapshot.sources[0]!
@@ -80,9 +81,13 @@ test('keeps daily capture separate and archives a mixed-day batch by content dat
     await window
       .getByPlaceholder(/^例如：/)
       .fill('2026年7月15日完成游戏 Agent 记忆方案评审，需要增加失败重试入口。')
-    await window.getByRole('button', { name: '保存并自动整理' }).click()
+    await window.getByRole('button', { name: '保存记录', exact: true }).click()
     await expect(window.getByText('游戏 Agent 记忆方案评审', { exact: false }).first()).toBeVisible()
     await expect(window.getByText('待整理').first()).toBeVisible()
+    await electronApp.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]!.setSize(960, 640))
+    await expect.poll(() => window.evaluate(() => globalThis.window.innerWidth)).toBe(960)
+    await window.screenshot({ path: testInfo.outputPath('capture-960x640.png') })
+    expect(await window.locator('.page-stack').filter({ has: window.locator('.capture-card') }).evaluate((element) => element.scrollWidth <= element.clientWidth + 1)).toBe(true)
 
     await window.locator('.quick-entry').filter({ hasText: '批量上传' }).click()
     await expect(window.getByRole('heading', { name: '先把资料放进待处理列表' })).toBeVisible()
@@ -95,6 +100,8 @@ test('keeps daily capture separate and archives a mixed-day batch by content dat
     await expect(window.getByText('2026-08-18', { exact: true })).toBeVisible()
     await expect(window.getByText('2026-08-19', { exact: true })).toBeVisible()
     await expect(window.getByText('2026-08-21', { exact: true })).toBeVisible()
+    await window.screenshot({ path: testInfo.outputPath('batch-review-960x640.png') })
+    expect(await window.locator('.batch-page').evaluate((element) => element.scrollWidth <= element.clientWidth + 1)).toBe(true)
     const importedDates = await window.evaluate(async () => {
       const snapshot = await globalThis.window.worklens.getSnapshot()
       return snapshot.sources
@@ -157,7 +164,10 @@ test('keeps daily capture separate and archives a mixed-day batch by content dat
       expect.objectContaining({ rawText: '2026年8月24日完成复制粘贴工作记录验证。', businessDate: '2026-08-24' })
     ]))
 
-    await window.getByRole('button', { name: '完成并查看时间线' }).click()
+    await window.getByRole('button', { name: '查看已保存资料' }).click()
+    await expect(window.getByRole('heading', { name: '工作资料库', exact: true })).toBeVisible()
+    await expect(window.locator('.source-library-row')).toHaveCount(6)
+    await window.locator('.sidebar').getByRole('button', { name: '工作时间线', exact: true }).click()
     await expect(window.getByRole('heading', { name: '工作时间线' })).toBeVisible()
     await expect(window.getByText('时间线等待第一条工作内容')).toBeVisible()
     await expect(window.locator('.timeline-card')).toHaveCount(0)

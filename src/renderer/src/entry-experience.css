@@ -1,0 +1,29 @@
+.ai-readiness, .session-return, .pending-analysis-notice {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  padding: 12px 16px; border: 1px solid var(--line); border-radius: 10px;
+  background: var(--panel); font-size: 12px; line-height: 1.6;
+}
+.ai-readiness > div, .pending-analysis-notice > div { flex: 1; min-width: 180px; }
+.ai-readiness strong, .ai-readiness small, .pending-analysis-notice strong, .pending-analysis-notice small { display: block; }
+.ai-readiness small, .pending-analysis-notice small { color: #696b75; font-size: 11px; }
+.ai-readiness.connected { border-color: #c8e1d8; }
+.ai-readiness > svg { color: var(--violet); flex: 0 0 auto; }
+.session-return { margin: 8px 28px 0; padding: 8px 12px; background: var(--violet-soft); }
+.session-return > span { flex: 1; }
+.source-panel-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.source-processing-state { display: flex; align-items: flex-start; flex-direction: column; gap: 4px; min-width: 0; }
+.source-processing-state small { font-size: 11px; color: #8c5549; overflow-wrap: anywhere; }
+.source-processing-state .text-button { font-size: 12px; }
+.draft-storage-error { color: #a3413e !important; font-size: 12px; }
+.batch-source-status { display: flex; gap: 8px; align-items: center; grid-column: 1 / -1; }
+.batch-source-status .text-button { font-size: 12px; }
+.batch-analysis-phase { display: flex; align-items: center; justify-content: center; gap: 8px; padding: 18px; color: var(--violet-dark); font-size: 14px; }
+.pending-analysis-notice { margin-top: 18px; background: var(--violet-soft); }
+.search-popover button[data-search-result]:focus-visible { outline: 2px solid var(--violet); outline-offset: -3px; background: var(--violet-soft); }
+.progress-banner.finished.error { color: #98473f; background: #fff0ed; }
+.progress-banner.finished.waiting, .progress-banner.finished.cancelled { color: #856531; background: #fff7e7; }
+.history-recent-jump { grid-column: 1 / -1; display: flex; justify-content: flex-end; margin-bottom: 10px; }
+@media (max-width: 1100px) {
+  .source-panel .panel-header { align-items: flex-start; flex-direction: column; gap: 10px; }
+  .session-return { margin-right: 18px; margin-left: 18px; }
+}
